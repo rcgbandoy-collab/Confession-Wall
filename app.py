@@ -197,7 +197,7 @@ with tab1:
     with st.form("new_message_form", clear_on_submit=True):
         target_name = st.selectbox(
             "Who is this message for?",
-            ["Teacher", "Official", "Canteen", "Library", "Administration", "General"],
+            ["Teacher", "Student", "Official", "Canteen", "Library", "Administration", "General"],
         )
         message = st.text_area("Message", height=150, placeholder="Write what's on your heart...")
         sender_name = st.text_input("From (optional — leave blank to stay Anonymous)")
