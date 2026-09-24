@@ -6,6 +6,8 @@ A GenAI-powered app where graduating students leave anonymous (or signed)
 farewell messages addressed to a teacher, official, or location (e.g. canteen,
 library). GenAI analyzes each message for sentiment, theme, and suggestions,
 and an insights dashboard summarizes everything for the school.
+
+UI: paper-note wall, free-text recipient, note-color picker.
 """
 
 import html
@@ -28,20 +30,25 @@ COLUMNS = [
     "note_color",  # NEW (optional): older rows without it still work
 ]
 
-# Card colors: name -> (picker emoji, card background hex)
+# name -> (picker emoji, paper color, tape color, ink color, soft ink color)
 NOTE_COLORS = {
-    "White":  ("⚪", "#ffffff"),
-    "Yellow": ("🟡", "#fff4b8"),
-    "Orange": ("🟠", "#ffdcb8"),
-    "Red":    ("🔴", "#ffcfcf"),
-    "Pink":   ("🩷", "#ffd9e6"),
-    "Purple": ("🟣", "#e6dbff"),
-    "Blue":   ("🔵", "#cfe4ff"),
-    "Teal":   ("🩵", "#c9f0ec"),
-    "Green":  ("🟢", "#d3f2d8"),
-    "Gray":   ("🩶", "#e4e6ea"),
+    "White":  ("⚪", "#fffdf6", "#e2d9c6", "#3b2f38", "#7a6a75"),
+    "Yellow": ("🟡", "#fff3b0", "#ffd54a", "#3b2f38", "#7a6a75"),
+    "Orange": ("🟠", "#ffd9b0", "#ffa94d", "#3b2a1a", "#7a5a3a"),
+    "Red":    ("🔴", "#ffc9c9", "#ff8787", "#3b1f1f", "#7a4a4a"),
+    "Pink":   ("🩷", "#ffd6e3", "#ff9ebd", "#3b2f38", "#7a6a75"),
+    "Purple": ("🟣", "#e4d7ff", "#b79cff", "#2f2a3b", "#6a6480"),
+    "Blue":   ("🔵", "#cfe6ff", "#8ec5ff", "#1f2f3b", "#4a6072"),
+    "Teal":   ("🩵", "#c6f0ea", "#7fd8cc", "#1f3b37", "#4a726c"),
+    "Green":  ("🟢", "#d5f5df", "#8fdcaa", "#1f3b2a", "#4a725a"),
+    "Gray":   ("🩶", "#e3e5e8", "#aeb4bb", "#2b2f33", "#666c72"),
+    "Brown":  ("🟤", "#c9a27a", "#8b5e3c", "#2d1f14", "#5a4030"),
+    "Black":  ("⚫", "#2b2b2f", "#8a8a92", "#f5f5f7", "#b5b5bd"),
 }
 COLOR_NAMES = list(NOTE_COLORS.keys())
+# Older rows with no saved color cycle through the light colors only
+FALLBACK_COLORS = [c for c in COLOR_NAMES if c not in ("Black", "Brown")]
+TILTS = [-2.0, 1.5, -1.0, 2.0, -1.5, 1.0]
 
 # Any instruct-tuned chat model available on HF Inference Providers works.
 # This one is free-tier friendly and good at following JSON instructions.
@@ -139,52 +146,53 @@ def save_message(row: dict):
 
 
 # --------------------------------------------------------------------------
-# STYLING (original Instagram-card look: centered text, soft shadow)
+# STYLING (cute pink paper-note wall)
 # --------------------------------------------------------------------------
 st.markdown("""
 <style>
-.confession-card {
-    background: #ffffff;
-    border-radius: 18px;
-    box-shadow: 0 8px 24px rgba(0,0,0,0.10);
-    padding: 32px 28px;
-    margin: 18px auto;
-    max-width: 480px;
-    text-align: center;
-    transition: transform .2s ease, box-shadow .2s ease;
+@import url('https://fonts.googleapis.com/css2?family=Caveat:wght@500;700&family=Quicksand:wght@400;600;700&display=swap');
+
+.stApp { background: linear-gradient(180deg, #fff5f8 0%, #fffaf0 100%); color: #4a3b47; }
+.stApp h1, .stApp h2, .stApp h3, .stApp label, .stApp p, .stApp span { font-family: 'Quicksand', sans-serif; }
+.stApp h1, .stApp h2, .stApp h3 { color: #b4457a; }
+.stApp label p { color: #6b4a5e !important; font-weight: 700; letter-spacing: .5px; }
+
+/* Wall: masonry-style columns (3 desktop / 2 tablet / 1 phone) */
+.wall { column-count: 3; column-gap: 26px; padding: 12px 6px 30px; }
+@media (max-width: 900px) { .wall { column-count: 2; } }
+@media (max-width: 600px) { .wall { column-count: 1; } }
+
+/* A paper note */
+.note {
+    --tilt: 0deg;
+    position: relative;
+    display: inline-block; width: 100%;
+    break-inside: avoid; box-sizing: border-box;
+    margin: 0 0 30px; padding: 30px 24px 18px;
+    border-radius: 6px 6px 18px 6px;
+    box-shadow: 0 6px 16px rgba(120, 80, 100, 0.18);
+    transform: rotate(var(--tilt));
+    transition: transform .25s ease, box-shadow .25s ease;
+    text-align: left; overflow-wrap: anywhere;
+    background-image: repeating-linear-gradient(transparent 0 27px, rgba(0,0,0,0.05) 27px 28px);
 }
-.confession-card:hover {
-    transform: translateY(-4px);
-    box-shadow: 0 14px 30px rgba(0,0,0,0.14);
+.note:hover { transform: rotate(0deg) translateY(-6px) scale(1.02); box-shadow: 0 14px 28px rgba(120,80,100,.25); }
+.note::before {   /* tape */
+    content: ''; position: absolute; top: -12px; left: 50%;
+    width: 84px; height: 24px; transform: translateX(-50%) rotate(-3deg);
+    background: var(--tape); opacity: .75; border-radius: 3px;
 }
-.confession-target {
-    font-size: 13px;
-    letter-spacing: 1px;
-    text-transform: uppercase;
-    color: #666;
-    margin-bottom: 10px;
-}
-.confession-message {
-    font-size: 18px;
-    line-height: 1.5;
-    color: #222;
-    margin: 14px 0;
-    overflow-wrap: anywhere;
-}
-.confession-tag {
-    display: inline-block;
-    background: rgba(255,255,255,0.7);
-    color: #6b46c1;
-    padding: 5px 14px;
-    border-radius: 999px;
-    font-size: 13px;
-    margin-top: 8px;
-}
-.confession-sender {
-    font-size: 12px;
-    color: #666;
-    margin-top: 14px;
-}
+.note-to { font-family: 'Quicksand', sans-serif; font-weight: 700; font-size: 13px;
+           letter-spacing: 1px; text-transform: uppercase; color: #7a5a6c; }
+.note-msg { font-family: 'Caveat', cursive; font-size: 25px; line-height: 28px; color: #3b2f38; margin: 14px 0; }
+.note-tag { display: inline-block; background: rgba(255,255,255,.7); color: #8a4a72;
+            padding: 3px 12px; border-radius: 999px; font-size: 12px; font-family: 'Quicksand', sans-serif; }
+.note-from { font-family: 'Caveat', cursive; font-size: 21px; color: #6b5262; margin-top: 10px; }
+.note-date { font-family: 'Quicksand', sans-serif; font-size: 11px; color: #9a8592; margin-top: 4px; }
+.note-deco { position: absolute; right: 14px; bottom: 10px; font-size: 16px; opacity: .8; }
+
+/* Single note (preview after posting) */
+.single { max-width: 420px; margin: 24px auto; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -196,27 +204,45 @@ def _clean(v) -> str:
     return html.escape(str(v))
 
 
-def render_card(row):
-    keywords = row["keywords"]
-    if isinstance(keywords, str) and keywords.startswith("["):
-        try:
-            keywords = ", ".join(json.loads(keywords.replace("'", '"')))
-        except Exception:
-            pass
+def _note_html(row) -> str:
+    """Build the HTML of one paper note (color chosen by the sender)."""
     color = row.get("note_color", "")
-    bg = NOTE_COLORS[color][1] if color in NOTE_COLORS else "#ffffff"  # old rows stay white
+    try:
+        rid = int(row.get("id", 0))
+    except Exception:
+        rid = 0
+    if color not in NOTE_COLORS:  # older rows: stable color from their id
+        color = FALLBACK_COLORS[rid % len(FALLBACK_COLORS)]
+    _, paper, tape, _ink, _sub = NOTE_COLORS[color]
+    tilt = TILTS[rid % len(TILTS)]
+    try:
+        date = pd.to_datetime(row.get("timestamp")).strftime("%B %d, %Y")
+    except Exception:
+        date = ""
     msg = _clean(row["message"]).replace("\n", "<br>")
     tag = _clean(row.get("emoji_tag", ""))
-    tag_html = f'<div class="confession-tag">{tag}</div>' if tag else ""
-    st.markdown(
-        f'<div class="confession-card" style="background:{bg};">'
-        f'<div class="confession-target">To: {_clean(row["target_name"])}</div>'
-        f'<div class="confession-message">"{msg}"</div>'
+    tag_html = f'<span class="note-tag">{tag}</span>' if tag else ""
+    return (
+        f'<div class="note" style="background-color:{paper};--tape:{tape};--tilt:{tilt}deg;">'
+        f'<div class="note-to">💌 To: {_clean(row["target_name"])}</div>'
+        f'<div class="note-msg">{msg}</div>'
         f'{tag_html}'
-        f'<div class="confession-sender">Message from: {_clean(row["sender_name"])}</div>'
-        f'</div>',
-        unsafe_allow_html=True,
+        f'<div class="note-from">— {_clean(row["sender_name"])}</div>'
+        f'<div class="note-date">{date}</div>'
+        f'<div class="note-deco">✨</div>'
+        f'</div>'
     )
+
+
+def render_card(row):
+    """Show a single note (used for the preview after posting)."""
+    st.markdown(f'<div class="single">{_note_html(row)}</div>', unsafe_allow_html=True)
+
+
+def render_wall(df: pd.DataFrame):
+    """Show many notes as a responsive paper wall."""
+    notes = "".join(_note_html(r) for _, r in df.iterrows())
+    st.markdown(f'<div class="wall">{notes}</div>', unsafe_allow_html=True)
 
 
 # --------------------------------------------------------------------------
@@ -225,7 +251,7 @@ def render_card(row):
 st.title("🎓 Confession Wall")
 st.caption("Say what's on your mind about teachers, rooms, staff, or fellow students.")
 
-tab1, tab2, tab3 = st.tabs(["✏️ Leave a Message", "📜 Browse Wall", "📊 Insights Dashboard"])
+tab1, tab2, tab3 = st.tabs(["✏ Leave a Message", "📝 Browse Wall", "📊 Insights"])
 
 # ---- TAB 1: Submit a message ----
 with tab1:
@@ -238,7 +264,7 @@ with tab1:
         message = st.text_area("Message", height=150, placeholder="Write what's on your mind...")
         sender_name = st.text_input("From (optional — leave blank to stay Anonymous)")
         note_color = st.radio(
-            "Choose your card color",
+            "Choose your note color",
             COLOR_NAMES,
             format_func=lambda n: f"{NOTE_COLORS[n][0]} {n}",
             horizontal=True,
@@ -286,8 +312,7 @@ with tab2:
     if filtered.empty:
         st.info("No messages match your search yet.")
     else:
-        for _, row in filtered.sort_values("id", ascending=False).iterrows():
-            render_card(row)
+        render_wall(filtered.sort_values("id", ascending=False))
 
 # ---- TAB 3: Insights dashboard ----
 with tab3:
