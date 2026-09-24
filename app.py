@@ -23,7 +23,7 @@ from huggingface_hub import InferenceClient
 DATA_PATH = "data/messages.csv"
 COLUMNS = [
     "id", "timestamp", "target_type", "target_name", "message",
-    "sender_name", "sentiment", "emoji_tag", "keywords", "suggestion",
+    "sender_name", "sentiment", "emoji_tag", "keywords", "suggestion", "views",
 ]
 
 # Any instruct-tuned chat model available on HF Inference Providers works.
@@ -195,27 +195,31 @@ tab1, tab2, tab3 = st.tabs(["💌 Leave a Message", "📜 Browse Wall", "📊 In
 with tab1:
     st.subheader("Write your message")
     with st.form("new_message_form", clear_on_submit=True):
-        target_name = st.text_input("Recipient", placeholder="e.g. Ma'am Santos, Canteen, Sir Reyes, the Library")
+        target_name = st.selectbox(
+            "Who is this message for?",
+            ["Teacher", "Official", "Canteen", "Library", "Administration", "General"],
+        )
         message = st.text_area("Message", height=150, placeholder="Write what's on your heart...")
         sender_name = st.text_input("From (optional — leave blank to stay Anonymous)")
         submitted = st.form_submit_button("Post to the Wall")
 
     if submitted:
-        if not message.strip() or not target_name.strip():
-            st.warning("Please fill in the recipient and your message.")
+        if not message.strip():
+            st.warning("Please write your message.")
         else:
             with st.spinner("Analyzing your message..."):
                 analysis = analyze_message(message, "Recipient", target_name)
             new_row = {
                 "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M"),
                 "target_type": "Recipient",
-                "target_name": target_name.strip(),
+                "target_name": target_name,
                 "message": message.strip(),
                 "sender_name": sender_name.strip() if sender_name.strip() else "Anonymous",
                 "sentiment": analysis.get("sentiment", "Neutral"),
                 "emoji_tag": analysis.get("emoji_tag", ""),
                 "keywords": ", ".join(analysis.get("keywords", [])),
                 "suggestion": analysis.get("suggestion", ""),
+                "views": 0,
             }
             save_message(new_row)
             st.success("Your message has been posted to the wall. 🎓")
