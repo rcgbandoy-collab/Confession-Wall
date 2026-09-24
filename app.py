@@ -175,7 +175,7 @@ def render_card(row):
             pass
     st.markdown(f"""
     <div class="confession-card">
-        <div class="confession-target">To: {row['target_type']} — {row['target_name']}</div>
+        <div class="confession-target">To: {row['target_name']}</div>
         <div class="confession-message">"{row['message']}"</div>
         <div class="confession-tag">{row.get('emoji_tag', '')}</div>
         <div class="confession-sender">Message from: {row['sender_name']}</div>
@@ -195,21 +195,20 @@ tab1, tab2, tab3 = st.tabs(["💌 Leave a Message", "📜 Browse Wall", "📊 In
 with tab1:
     st.subheader("Write your message")
     with st.form("new_message_form", clear_on_submit=True):
-        target_type = st.selectbox("Who or what is this message for?", ["Teacher", "Official", "Location", "General"])
-        target_name = st.text_input("Name (e.g. Ma'am Santos, Canteen, Library)")
-        message = st.text_area("Your message", height=150, placeholder="Write what's on your heart...")
-        sender_name = st.text_input("Message from (optional — leave blank to stay Anonymous)")
+        target_name = st.text_input("Recipient", placeholder="e.g. Ma'am Santos, Canteen, Sir Reyes, the Library")
+        message = st.text_area("Message", height=150, placeholder="Write what's on your heart...")
+        sender_name = st.text_input("From (optional — leave blank to stay Anonymous)")
         submitted = st.form_submit_button("Post to the Wall")
 
     if submitted:
         if not message.strip() or not target_name.strip():
-            st.warning("Please fill in the target name and your message.")
+            st.warning("Please fill in the recipient and your message.")
         else:
             with st.spinner("Analyzing your message..."):
-                analysis = analyze_message(message, target_type, target_name)
+                analysis = analyze_message(message, "Recipient", target_name)
             new_row = {
                 "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                "target_type": target_type,
+                "target_type": "Recipient",
                 "target_name": target_name.strip(),
                 "message": message.strip(),
                 "sender_name": sender_name.strip() if sender_name.strip() else "Anonymous",
@@ -227,20 +226,14 @@ with tab2:
     st.subheader("The Wall")
     df = load_data()
 
-    col1, col2 = st.columns(2)
-    with col1:
-        type_filter = st.multiselect("Filter by type", df["target_type"].unique().tolist())
-    with col2:
-        name_filter = st.text_input("Search by name (teacher, location, etc.)")
+    name_filter = st.text_input("Search by recipient name")
 
     filtered = df.copy()
-    if type_filter:
-        filtered = filtered[filtered["target_type"].isin(type_filter)]
     if name_filter:
         filtered = filtered[filtered["target_name"].str.contains(name_filter, case=False, na=False)]
 
     if filtered.empty:
-        st.info("No messages match your filters yet.")
+        st.info("No messages match your search yet.")
     else:
         for _, row in filtered.sort_values("id", ascending=False).iterrows():
             render_card(row)
@@ -278,7 +271,7 @@ with tab3:
             st.info("No suggestions extracted yet.")
         else:
             for _, row in suggestions.iterrows():
-                st.markdown(f"- **[{row['target_type']} — {row['target_name']}]** {row['suggestion']}")
+                st.markdown(f"- **[{row['target_name']}]** {row['suggestion']}")
 
         st.markdown("### 💬 Ask about the Wall")
         question = st.text_input("Ask a question about the messages (e.g. 'What do students say about the canteen?')")
