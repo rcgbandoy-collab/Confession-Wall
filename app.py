@@ -36,8 +36,21 @@ DATA_PATH = "data/messages.csv"
 COLUMNS = [
     "id", "timestamp", "target_type", "target_name", "message",
     "sender_name", "sentiment", "emoji_tag", "keywords", "suggestion", "views",
-    "note_color",  # NEW (optional): older rows without it still work
+    "note_color",
+    # Per-note "Confession Analyzer" fields (cached so we don't re-call the
+    # API every time the same note is opened) — additive, older rows without
+    # these just show as "not yet analyzed" until someone opens them.
+    "meaning", "emotion", "secondary_emotion", "intensity", "analyzed_at",
 ]
+
+# Controlled emotion vocabulary — used both by the per-note analyzer AND the
+# Insights "Emotions on the Wall" chart, so they always speak the same language.
+EMOTION_CATEGORIES = {
+    "Happiness": "😊", "Sadness": "😢", "Love": "❤️", "Anger": "😡",
+    "Loneliness": "😔", "Fear": "😨", "Gratitude": "😌", "Excitement": "🎉",
+    "Confusion": "😕", "Heartbreak": "💔", "Neutral": "😐",
+    "Support": "🤝", "Surprise": "😮",
+}
 
 # name -> (picker emoji, paper color, tape color, ink color, soft ink color)
 NOTE_COLORS = {
@@ -151,6 +164,48 @@ say so honestly instead of guessing.
         return f"Sorry, I couldn't process that: {e}"
 
 
+def analyze_emotion(message: str) -> dict:
+    """Confession Analyzer: interpret ONE confession's meaning + emotion.
+
+    Separate from analyze_message() (which handles the sentiment/keywords/
+    suggestion shown when a note is first posted) — this powers the
+    click-to-view 'THE MEANING' + 'EMOTION REVIEW' panel instead.
+    """
+    categories = ", ".join(EMOTION_CATEGORIES.keys())
+    prompt = f"""
+You are reading one confession/farewell message posted on a "Confession Wall" app.
+Interpret ONLY what is reasonably supported by the text — do not invent events,
+relationships, names, or psychological diagnoses that weren't stated. If the
+message is ambiguous, use wording like "The message appears to express...".
+If the message is clearly neutral, use "Neutral" as the emotion.
+
+Confession: "{message}"
+
+Return ONLY a valid JSON object (no markdown, no extra text) with these exact keys:
+- "meaning": ONE to TWO short sentences on what the confession appears to express.
+  Go directly to the meaning — no filler like "I understand..." or "Let me analyze...".
+- "emotion": the single best-fitting category from this exact list: [{categories}]
+- "secondary_emotion": a second-best fitting category from the same list, or "" if none fits
+- "intensity": one word, one of [Mild, Moderate, Strong]
+"""
+    try:
+        text = _chat(prompt, temperature=0.3)
+        text = text.replace("```json", "").replace("```", "").strip()
+        start, end = text.find("{"), text.rfind("}")
+        text = text[start:end + 1]
+        result = json.loads(text)
+        if result.get("emotion") not in EMOTION_CATEGORIES:
+            result["emotion"] = "Neutral"
+        if result.get("secondary_emotion") not in EMOTION_CATEGORIES:
+            result["secondary_emotion"] = ""
+        return result
+    except Exception as e:
+        return {
+            "meaning": f"(Analysis unavailable: {e})",
+            "emotion": "Neutral", "secondary_emotion": "", "intensity": "Mild",
+        }
+
+
 # --------------------------------------------------------------------------
 # DATA HELPERS
 # --------------------------------------------------------------------------
@@ -172,6 +227,39 @@ def save_message(row: dict):
     row["id"] = new_id
     df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
     df.to_csv(DATA_PATH, index=False)
+
+
+def update_message_analysis(note_id: int, analysis: dict):
+    """Persist a note's emotion analysis back into the CSV so it's cached —
+    the same stored values feed both the note viewer AND the Insights chart."""
+    df = load_data()
+    mask = df["id"] == note_id
+    if not mask.any():
+        return
+    df.loc[mask, "meaning"] = analysis.get("meaning", "")
+    df.loc[mask, "emotion"] = analysis.get("emotion", "Neutral")
+    df.loc[mask, "secondary_emotion"] = analysis.get("secondary_emotion", "")
+    df.loc[mask, "intensity"] = analysis.get("intensity", "Mild")
+    df.loc[mask, "analyzed_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+    df.to_csv(DATA_PATH, index=False)
+
+
+def get_or_analyze_emotion(row: pd.Series) -> dict:
+    """Return the cached emotion analysis for a note, or run it once and save it.
+
+    Per the spec: don't re-call the API every time the same note is opened —
+    only analyze if there's no saved result yet.
+    """
+    if str(row.get("emotion", "")).strip():
+        return {
+            "meaning": row.get("meaning", ""),
+            "emotion": row.get("emotion", "Neutral"),
+            "secondary_emotion": row.get("secondary_emotion", ""),
+            "intensity": row.get("intensity", "Mild"),
+        }
+    result = analyze_emotion(row["message"])
+    update_message_analysis(int(row["id"]), result)
+    return result
 
 
 # --------------------------------------------------------------------------
@@ -298,6 +386,50 @@ st.markdown("""
     border-radius: 50% !important; width: 36px !important; height: 36px !important;
     padding: 0 !important;
 }
+
+/* ---------- Clickable note cards on the wall ---------- */
+[class*="st-key-note_wrap_"] { position: relative; }
+[class*="st-key-note_wrap_"] [data-testid="stButton"] { margin-top: -14px; }
+[class*="st-key-note_wrap_"] [data-testid="stButton"] button {
+    width: 100%; background: rgba(124,58,237,.12) !important; color: #b79cff !important;
+    border: 1px dashed rgba(124,58,237,.4) !important; border-radius: 10px !important;
+    font-family: 'Quicksand', sans-serif !important; font-size: 12px !important;
+}
+
+/* ---------- Confession Analyzer modal: same blurred backdrop as the AI chat ---------- */
+.st-key-note_overlay {
+    position: fixed !important; inset: 0 !important; z-index: 9998 !important;
+    background: rgba(20, 10, 30, .5) !important;
+    backdrop-filter: blur(6px) !important; -webkit-backdrop-filter: blur(6px) !important;
+    display: flex !important; align-items: center !important; justify-content: center !important;
+    padding: 20px !important; overflow-y: auto !important;
+}
+.st-key-note_modal {
+    background: #1c1626 !important; border-radius: 20px !important;
+    width: 760px !important; max-width: 94vw !important; max-height: 88vh !important;
+    box-shadow: 0 25px 60px rgba(0,0,0,.5) !important;
+    overflow: hidden !important; animation: cwOpen .18s ease-out;
+    display: flex !important; flex-direction: column !important;
+}
+.st-key-note_close button {
+    background: rgba(255,255,255,.1) !important; border: none !important;
+    color: #fff !important; border-radius: 50% !important;
+    width: 32px !important; height: 32px !important; padding: 0 !important;
+}
+.cw-note-grid { display: flex; gap: 0; overflow-y: auto; }
+@media (max-width: 720px) { .cw-note-grid { flex-direction: column; } }
+.cw-note-left { flex: 1; padding: 22px; display: flex; align-items: flex-start; justify-content: center; }
+.cw-note-right { flex: 1; padding: 22px; border-left: 1px solid rgba(255,255,255,.08); }
+@media (max-width: 720px) { .cw-note-right { border-left: none; border-top: 1px solid rgba(255,255,255,.08); } }
+
+.cw-ai-badge { font-family: 'Quicksand', sans-serif; font-weight: 700; font-size: 13px;
+               color: #b79cff; letter-spacing: .5px; margin-bottom: 14px; }
+.cw-meaning-label, .cw-emotion-label { font-family: 'Quicksand', sans-serif; font-weight: 700;
+    font-size: 12px; letter-spacing: 1px; text-transform: uppercase; color: #9a8fb0; margin: 14px 0 6px; }
+.cw-meaning-text { font-family: 'Quicksand', sans-serif; font-size: 15px; line-height: 1.5; color: #f0eaf7; }
+.cw-emotion-badge { font-family: 'Quicksand', sans-serif; font-size: 16px; font-weight: 700; color: #f0eaf7; }
+.cw-emotion-secondary { font-family: 'Quicksand', sans-serif; font-size: 13px; color: #b0a4c4; margin-top: 4px; }
+.cw-intensity { font-family: 'Quicksand', sans-serif; font-size: 12px; color: #9a8fb0; margin-top: 8px; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -485,6 +617,71 @@ def render_wall(df: pd.DataFrame):
     st.markdown(f'<div class="wall">{notes}</div>', unsafe_allow_html=True)
 
 
+def render_note_modal():
+    """Confession Analyzer: focused modal for one note — original note on the
+    left, AI 'meaning' + 'emotion review' on the right (stacks on mobile)."""
+    df = load_data()
+    match = df[df["id"] == st.session_state.selected_note_id]
+    if match.empty:
+        st.session_state.note_modal_open = False
+        return
+    row = match.iloc[0]
+
+    with st.container(key="note_overlay"):
+        with st.container(key="note_modal"):
+            top1, top2 = st.columns([8, 1])
+            with top1:
+                st.markdown(
+                    '<div style="padding:14px 18px 0; font-family:Quicksand,sans-serif; '
+                    'font-weight:700; color:#b79cff; font-size:14px;">🔍 Confession Analyzer</div>',
+                    unsafe_allow_html=True,
+                )
+            with top2:
+                with st.container(key="note_close"):
+                    if st.button("✕", key="note_close_btn"):
+                        st.session_state.note_modal_open = False
+                        st.rerun()
+
+            st.markdown('<div class="cw-note-grid">', unsafe_allow_html=True)
+
+            left, right = st.columns(2)
+            with left:
+                st.markdown(f'<div class="cw-note-left">{_note_html(row)}</div>', unsafe_allow_html=True)
+
+            with right:
+                already_analyzed = str(row.get("emotion", "")).strip() != ""
+                if already_analyzed:
+                    result = get_or_analyze_emotion(row)
+                else:
+                    with st.spinner("✨ AI is reading this confession..."):
+                        result = get_or_analyze_emotion(row)
+
+                # subtle accent from the note's own color
+                color_name = row.get("note_color", "")
+                if color_name not in NOTE_COLORS:
+                    color_name = FALLBACK_COLORS[int(row["id"]) % len(FALLBACK_COLORS)]
+                accent = NOTE_COLORS[color_name][2]
+
+                emo = result.get("emotion", "Neutral")
+                sec = result.get("secondary_emotion", "")
+                emo_icon = EMOTION_CATEGORIES.get(emo, "😐")
+                sec_icon = EMOTION_CATEGORIES.get(sec, "")
+
+                right_html = f'<div class="cw-note-right" style="border-top:3px solid {accent};">'
+                right_html += '<div class="cw-ai-badge">✨ AI Interpretation</div>'
+                right_html += '<div class="cw-meaning-label">The Meaning</div>'
+                right_html += f'<div class="cw-meaning-text">{_clean(result.get("meaning",""))}</div>'
+                right_html += '<div class="cw-emotion-label">Emotion Review</div>'
+                right_html += f'<div class="cw-emotion-badge">{emo_icon} {_clean(emo)}</div>'
+                if sec:
+                    right_html += f'<div class="cw-emotion-secondary">Secondary: {sec_icon} {_clean(sec)}</div>'
+                right_html += f'<div class="cw-intensity">Intensity: {_clean(result.get("intensity","Mild"))}</div>'
+                right_html += '</div>'
+                st.markdown(right_html, unsafe_allow_html=True)
+
+            st.markdown('</div>', unsafe_allow_html=True)
+
+
 def _guess_note_accent(answer: str, df: pd.DataFrame):
     """If the AI's reply mentions a sender/author from the wall, return that
     note's accent color (hex) so the AI chat bubble can match it. Returns
@@ -514,8 +711,16 @@ if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 if "chat_pending" not in st.session_state:
     st.session_state.chat_pending = None
+if "note_modal_open" not in st.session_state:
+    st.session_state.note_modal_open = False
+if "selected_note_id" not in st.session_state:
+    st.session_state.selected_note_id = None
 
-if not st.session_state.chat_open:
+# Only one overlay active at a time: opening the Confession Analyzer closes the chat.
+if st.session_state.note_modal_open:
+    st.session_state.chat_open = False
+    render_note_modal()
+elif not st.session_state.chat_open:
     # CLOSED: only the small floating purple icon is visible.
     with st.container(key="chat_toggle_btn"):
         if st.button("💬", key="chat_toggle"):
@@ -532,7 +737,7 @@ else:
                 with hcol1:
                     st.markdown(
                         '<div class="cw-header-title">AI Assistant</div>'
-                        '<div class="cw-header-sub">Ask anything about the messages posted here.</div>',
+                        '<div class="cw-header-sub">Ask anything about the confessions posted on the wall.</div>',
                         unsafe_allow_html=True,
                     )
                 with hcol2:
@@ -546,7 +751,7 @@ else:
                 body_html += (
                     '<div class="cw-row ai"><div>'
                     '<div class="cw-label">AI</div>'
-                    '<div class="cw-bubble ai">Ask me anything — about the wall, or anything else!</div>'
+                    '<div class="cw-bubble ai">Ask me anything about the confessions posted on the wall!</div>'
                     '</div></div>'
                 )
             for turn in st.session_state.chat_history:
@@ -675,23 +880,39 @@ with tab2:
     if filtered.empty:
         st.info("No messages match your search yet.")
     else:
-        render_wall(filtered.sort_values("id", ascending=False))
+        st.caption("Tap 🔍 View on any note to see the AI's interpretation.")
+        rows = filtered.sort_values("id", ascending=False).to_dict(orient="records")
+        n_cols = 3
+        cols = st.columns(n_cols)
+        for i, note_row in enumerate(rows):
+            with cols[i % n_cols]:
+                with st.container(key=f"note_wrap_{note_row['id']}"):
+                    st.markdown(_note_html(note_row), unsafe_allow_html=True)
+                    if st.button("🔍 View", key=f"view_note_{note_row['id']}"):
+                        st.session_state.selected_note_id = note_row["id"]
+                        st.session_state.note_modal_open = True
+                        st.rerun()
 
 # ---- TAB 3: Insights dashboard ----
 with tab3:
-    st.subheader("Insights for the School")
+    st.subheader("🧠 Confession Wall Insights")
+    st.caption("A quick look at what people are sharing on the wall.")
     df = load_data()
     analyzed = df[df["sentiment"].notna() & (df["sentiment"] != "")]
+    emotion_analyzed = df[df["emotion"].notna() & (df["emotion"] != "")]
 
-    if analyzed.empty:
-        st.info("No analyzed messages yet. Post a message in the first tab to see insights.")
+    if analyzed.empty and emotion_analyzed.empty:
+        st.info("No analyzed messages yet. Post a message, or open one on the Browse Wall, to see insights.")
     else:
         c1, c2 = st.columns(2)
         with c1:
-            sentiment_counts = analyzed["sentiment"].value_counts().reset_index()
-            sentiment_counts.columns = ["sentiment", "count"]
-            fig = px.pie(sentiment_counts, names="sentiment", values="count", title="Sentiment Distribution")
-            st.plotly_chart(fig, use_container_width=True)
+            if not analyzed.empty:
+                sentiment_counts = analyzed["sentiment"].value_counts().reset_index()
+                sentiment_counts.columns = ["sentiment", "count"]
+                fig = px.pie(sentiment_counts, names="sentiment", values="count", title="Sentiment Distribution")
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("No sentiment data yet.")
 
         with c2:
             all_keywords = analyzed["keywords"].dropna().str.split(", ").explode()
@@ -704,10 +925,27 @@ with tab3:
             else:
                 st.info("Not enough keyword data yet.")
 
-        st.markdown("### 💡 Suggestions Extracted for the School")
+        # Emotions on the Wall — fed by the same per-note analysis shown in the
+        # Confession Analyzer modal (Browse Wall → 🔍 View). Same data, same chart.
+        st.markdown("### 😊 Emotions on the Wall")
+        if emotion_analyzed.empty:
+            st.info("No confessions analyzed yet — open a note on the Browse Wall and tap 🔍 View.")
+        else:
+            emo_counts = emotion_analyzed["emotion"].value_counts().reset_index()
+            emo_counts.columns = ["emotion", "count"]
+            emo_counts["label"] = emo_counts["emotion"].apply(
+                lambda e: f"{EMOTION_CATEGORIES.get(e, '')} {e}"
+            )
+            fig3 = px.bar(emo_counts, x="label", y="count", title="Most Common Emotions (from analyzed confessions)")
+            st.plotly_chart(fig3, use_container_width=True)
+            top = emo_counts.iloc[0]
+            st.caption(f"Most common emotion so far: **{top['label']}**")
+
+        st.markdown("### 💡 Wall Insights")
+        st.caption("AI-generated notes surfaced from what people are posting — not a school evaluation.")
         suggestions = analyzed[analyzed["suggestion"].notna() & (analyzed["suggestion"] != "")]
         if suggestions.empty:
-            st.info("No suggestions extracted yet.")
+            st.info("No wall insights extracted yet.")
         else:
             for _, row in suggestions.iterrows():
                 st.markdown(f"- **[{row['target_name']}]** {row['suggestion']}")
@@ -721,4 +959,4 @@ with tab3:
             mime="text/csv",
         )
 
-        st.info("💬 Tap the chat icon (top-right, any tab) to ask questions about the wall.")
+        st.info("💬 Tap the chat icon (top-right, any tab) to ask about the confessions on the wall.")
