@@ -430,7 +430,7 @@ if "chat_history" not in st.session_state:
 if "chat_pending" not in st.session_state:
     st.session_state.chat_pending = None
 
-_CHAT_HEAD_JS = """
+_CHAT_HEAD_JS = r"""
 (function () {
     var doc = window.parent.document;
     function findButtonByText(text) {
@@ -500,7 +500,7 @@ _CHAT_HEAD_JS = """
 })();
 """
 
-_CHAT_MODAL_JS = """
+_CHAT_MODAL_JS = r"""
 (function () {
     var doc = window.parent.document;
     function blockFor(id) {
