@@ -12,7 +12,8 @@ suggestions for the school.
    pip install -r requirements.txt
    ```
 2. Copy `.streamlit/secrets.toml.example` to `.streamlit/secrets.toml` and add
-   your OpenAI API key.
+   your Hugging Face access token (get one free at
+   https://huggingface.co/settings/tokens — "Read" access is enough).
 3. Run the app:
    ```
    streamlit run app.py
@@ -31,5 +32,7 @@ suggestions for the school.
 
 ## Data Source / Citation
 
-Dataset self-collected from [your school/org name] graduating students via a
-Google Form, [collection date]. Cite this in your submission document.
+- Primary dataset: self-collected via the app's built-in submission form (Confession Wall feature), gathered from [your school/org name] graduating students.
+- Seed/reference data (rows 6-13 in `messages.csv`) adapted in style from:
+  - Miah, M.S.U. et al. (2023). *A Novel Dataset for Aspect-based Sentiment Analysis for Teacher Performance Evaluation.* Mendeley Data, V1. https://data.mendeley.com/datasets/b2yhc95rnx/1
+  - He, J. (2020). *Big Data Set from RateMyProfessor.com for Professors' Teaching Evaluation.* Mendeley Data, V2. https://data.mendeley.com/datasets/fvtfjyvw7d/2 (also mirrored on Kaggle as "RateMyProfessor_Sample data")
