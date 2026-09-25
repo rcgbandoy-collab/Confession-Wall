@@ -248,7 +248,7 @@ Reply in 2-4 sentences unless the question clearly needs more.
 def _guess_note_accent(answer: str, df: pd.DataFrame):
     """If the AI's reply names one author, tint that AI bubble with that
     author's most recent note color (subtle, per-message — not the whole
-    chatbot theme, which stays grey by default)."""
+    chatbot theme, which stays purple by default)."""
     names = [n for n in df["sender_name"].dropna().unique() if n and n.lower() != "anonymous"]
     names.sort(key=len, reverse=True)  # longer names first avoids partial-name collisions
     low = answer.lower()
@@ -350,7 +350,7 @@ st.markdown("""
 .cw-row.user { justify-content: flex-end; }
 @keyframes cwIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
 
-.cw-label { font-family: 'Quicksand', sans-serif; font-size: 10px; color: rgba(255,255,255,.8); margin: 0 4px 2px; text-align: right; }
+.cw-label { font-family: 'Quicksand', sans-serif; font-size: 10px; color: #999; margin: 0 4px 2px; text-align: right; }
 .cw-row.ai .cw-label { text-align: left; }
 
 .cw-bubble {
@@ -358,16 +358,16 @@ st.markdown("""
     font-family: 'Quicksand', sans-serif; font-size: 14px; line-height: 1.4;
     box-shadow: 0 1px 2px rgba(0,0,0,.08);
 }
-.cw-bubble.ai { background: #e5e7eb; color: #1f2937; border-bottom-left-radius: 4px; }
-.cw-bubble.user { background: #2563eb; color: #fff; border-bottom-right-radius: 4px; }
+.cw-bubble.ai { background: #7c3aed; color: #fff; border-bottom-left-radius: 4px; }
+.cw-bubble.user { background: #f1f0f5; color: #222; border-bottom-right-radius: 4px; }
 .cw-bubble strong { text-decoration: underline; text-underline-offset: 2px; }
 
 .cw-typing {
     display: inline-flex; gap: 4px; padding: 12px 14px;
-    background: #e5e7eb; border-radius: 16px; border-bottom-left-radius: 4px;
+    background: #7c3aed; border-radius: 16px; border-bottom-left-radius: 4px;
 }
 .cw-typing span {
-    width: 6px; height: 6px; border-radius: 50%; background: #6b7280;
+    width: 6px; height: 6px; border-radius: 50%; background: #fff;
     animation: cwBlink 1.2s infinite ease-in-out;
 }
 .cw-typing span:nth-child(2) { animation-delay: .2s; }
@@ -447,10 +447,7 @@ if "chat_pending" not in st.session_state:
 
 _CHAT_HEAD_JS = r"""
 (function () {
-    var win = window.parent;
-    var doc = win.document;
-    var SIZE = 56;
-
+    var doc = window.parent.document;
     function findButtonByText(text) {
         var btns = doc.querySelectorAll('[data-testid="stButton"] button');
         for (var i = 0; i < btns.length; i++) {
@@ -458,117 +455,60 @@ _CHAT_HEAD_JS = r"""
         }
         return null;
     }
-
-    function place(wrap, left, top) {
-        var maxL = win.innerWidth - SIZE - 4;
-        var maxT = win.innerHeight - SIZE - 4;
-        wrap.style.left = Math.max(4, Math.min(left, maxL)) + 'px';
-        wrap.style.top = Math.max(4, Math.min(top, maxT)) + 'px';
-        wrap.style.right = 'auto';
-        wrap.style.bottom = 'auto';
-    }
-
-    // Global listeners: bound only once, even though this script re-runs on every rerun
-    function bindOnce() {
-        if (win.__cwHeadBound) return;
-        win.__cwHeadBound = true;
-
-        doc.addEventListener('pointermove', function (e) {
-            var s = win.__cwHeadState;
-            if (!s || !s.down) return;
-            var dx = e.clientX - s.x0, dy = e.clientY - s.y0;
-            if (!s.moved && Math.abs(dx) + Math.abs(dy) > 4) s.moved = true;
-            if (!s.moved) return;
-            s.nextL = s.left0 + dx;
-            s.nextT = s.top0 + dy;
-            if (!s.raf) {
-                s.raf = win.requestAnimationFrame(function () {
-                    s.raf = null;
-                    place(s.wrap, s.nextL, s.nextT);
-                });
-            }
-        });
-
-        doc.addEventListener('pointerup', function () {
-            var s = win.__cwHeadState;
-            if (!s || !s.down) return;
-            s.down = false;
-            clearTimeout(s.timer);
-            s.wrap.style.transform = '';
-            if (s.moved) {
-                s.swallow = true;  // don't let this drop count as a click
-                setTimeout(function () { s.swallow = false; }, 400);
-                var r = s.wrap.getBoundingClientRect();
-                try {
-                    win.sessionStorage.setItem('cwHeadPos', JSON.stringify({ left: r.left, top: r.top }));
-                } catch (err) {}
-            }
-        });
-
-        // Capture-phase click filter: swallows the click only right after a drag
-        doc.addEventListener('click', function (e) {
-            var s = win.__cwHeadState;
-            if (s && s.swallow) {
-                s.swallow = false;
-                e.stopPropagation();
-                e.preventDefault();
-            }
-        }, true);
-    }
-
-    function onDown(e) {
-        if (e.pointerType === 'mouse' && e.button !== 0) return;
-        var wrap = e.currentTarget;
-        var r = wrap.getBoundingClientRect();
-        var s = {
-            wrap: wrap, down: true, moved: false, swallow: false,
-            x0: e.clientX, y0: e.clientY, left0: r.left, top0: r.top,
-            timer: null, raf: null
-        };
-        // Long press (~180ms) = "lift" visual, so the user knows it's grabbed
-        s.timer = setTimeout(function () {
-            wrap.style.transform = 'scale(1.1)';
-        }, 180);
-        win.__cwHeadState = s;
-    }
-
     function styleFloatingHead() {
-        bindOnce();
-        var btn = findButtonByText('\ud83d\udcac');  // 💬
+        var btn = findButtonByText('\ud83d\udcac');  // 💬 speech bubble
         if (!btn) return;
         var wrap = btn.closest('[data-testid="stButton"]');
         if (!wrap || wrap.dataset.cwStyled) return;
         wrap.dataset.cwStyled = '1';
-
         wrap.style.position = 'fixed';
+        wrap.style.bottom = '24px';
+        wrap.style.right = '24px';
         wrap.style.zIndex = '999997';
         wrap.style.touchAction = 'none';
-        wrap.style.transition = 'transform .15s ease';
-
         btn.style.background = 'linear-gradient(135deg, #7c3aed, #9333ea)';
         btn.style.color = '#fff';
         btn.style.border = 'none';
         btn.style.borderRadius = '50%';
-        btn.style.width = SIZE + 'px';
-        btn.style.height = SIZE + 'px';
+        btn.style.width = '56px';
+        btn.style.height = '56px';
         btn.style.padding = '0';
         btn.style.fontSize = '24px';
         btn.style.boxShadow = '0 6px 18px rgba(124,58,237,.5)';
         btn.style.cursor = 'grab';
-        btn.style.touchAction = 'none';
-
-        // Restore last position (survives reruns and open/close)
-        var saved = null;
-        try { saved = JSON.parse(win.sessionStorage.getItem('cwHeadPos')); } catch (e) {}
-        if (saved && typeof saved.left === 'number') {
-            place(wrap, saved.left, saved.top);
-        } else {
-            place(wrap, win.innerWidth - SIZE - 24, win.innerHeight - SIZE - 24);
+        // make it a draggable "chat head" like Messenger's bubble
+        var dragging = false, moved = false, startX = 0, startY = 0;
+        function down(x, y) {
+            dragging = true; moved = false; startX = x; startY = y;
+            var r = wrap.getBoundingClientRect();
+            wrap.style.left = r.left + 'px'; wrap.style.top = r.top + 'px';
+            wrap.style.right = 'auto'; wrap.style.bottom = 'auto';
         }
-
-        wrap.addEventListener('pointerdown', onDown);
+        function move(x, y) {
+            if (!dragging) return;
+            var dx = x - startX, dy = y - startY;
+            if (Math.abs(dx) > 5 || Math.abs(dy) > 5) moved = true;
+            if (!moved) return;
+            var r = wrap.getBoundingClientRect();
+            var nl = Math.max(4, Math.min(r.left + dx, window.innerWidth - r.width - 4));
+            var nt = Math.max(4, Math.min(r.top + dy, window.innerHeight - r.height - 4));
+            wrap.style.left = nl + 'px'; wrap.style.top = nt + 'px';
+            startX = x; startY = y;
+        }
+        function up() {
+            if (moved) {
+                var swallow = function (ev) { ev.stopPropagation(); ev.preventDefault(); btn.removeEventListener('click', swallow, true); };
+                btn.addEventListener('click', swallow, true);
+            }
+            dragging = false;
+        }
+        wrap.addEventListener('mousedown', function (e) { down(e.clientX, e.clientY); });
+        doc.addEventListener('mousemove', function (e) { move(e.clientX, e.clientY); });
+        doc.addEventListener('mouseup', up);
+        wrap.addEventListener('touchstart', function (e) { var t = e.touches[0]; down(t.clientX, t.clientY); }, { passive: true });
+        doc.addEventListener('touchmove', function (e) { var t = e.touches[0]; move(t.clientX, t.clientY); }, { passive: true });
+        doc.addEventListener('touchend', up);
     }
-
     styleFloatingHead();
     setTimeout(styleFloatingHead, 200);
     setTimeout(styleFloatingHead, 600);
@@ -609,19 +549,19 @@ _CHAT_MODAL_JS = r"""
         overlay.style.justifyContent = 'center';
         overlay.style.padding = '20px';
 
-        modal.style.background = 'transparent';
-        modal.style.borderRadius = '0';
-        modal.style.width = '460px';
+        modal.style.background = '#fff';
+        modal.style.borderRadius = '20px';
+        modal.style.width = '380px';
         modal.style.maxWidth = '92vw';
         modal.style.maxHeight = '82vh';
-        modal.style.boxShadow = 'none';
+        modal.style.boxShadow = '0 25px 60px rgba(0,0,0,.45)';
         modal.style.display = 'flex';
         modal.style.flexDirection = 'column';
         modal.style.overflow = 'hidden';
         modal.style.animation = 'cwOpen .18s ease-out';
 
         if (header) {
-            header.style.background = 'transparent';
+            header.style.background = 'linear-gradient(135deg, #7c3aed, #9333ea)';
             header.style.padding = '6px 4px 6px 18px';
             var newBtn = findButtonByText(header, '\ud83d\uddd1\ufe0f');
             var closeBtn = findButtonByText(header, '\u2715');
@@ -639,20 +579,18 @@ _CHAT_MODAL_JS = r"""
         }
 
         if (inputbar) {
-            inputbar.style.borderTop = 'none';
+            inputbar.style.borderTop = '1px solid #eee';
             inputbar.style.padding = '10px 12px';
-            inputbar.style.background = 'transparent';
+            inputbar.style.background = '#fff';
             var inp = inputbar.querySelector('input[type="text"]');
             if (inp) {
                 inp.style.borderRadius = '999px';
-                inp.style.border = 'none';
+                inp.style.border = '1px solid #ddd';
                 inp.style.padding = '8px 14px';
-                inp.style.background = 'rgba(255,255,255,.92)';
-                inp.style.color = '#111';
             }
             var sendBtn = findButtonByText(inputbar, '\u27a4');
             if (sendBtn) {
-                sendBtn.style.background = '#2563eb';
+                sendBtn.style.background = '#7c3aed';
                 sendBtn.style.color = '#fff';
                 sendBtn.style.border = 'none';
                 sendBtn.style.borderRadius = '50%';
