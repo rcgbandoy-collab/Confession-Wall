@@ -3,5304 +3,1259 @@ Confession Wall — Graduating Student Farewell Messages
 CS 315 - Application Development and Emerging Technologies | Activity 3
 
 A GenAI-powered app where graduating students leave anonymous (or signed)
-farewell messages addressed to a teacher, official, or location.
+farewell messages addressed to a teacher, official, or location (e.g. canteen,
+library). GenAI analyzes each message for sentiment, theme, and suggestions,
+and an insights dashboard summarizes everything for the school.
 
-GenAI analyzes each message for:
-- Sentiment
-- Emoji tag
-- Keywords / themes
-- Suggestions
+UI: paper-note wall, free-text recipient, note-color picker, floating
+purple iOS-style AI chat MODAL (not a sidebar) with a blurred backdrop.
 
-The app also provides:
-- Paper-note wall
-- Searchable recipients
-- Note color picker
-- Clickable notes
-- AI meaning + emotion review
-- Floating purple AI chatbot
-- Lightweight RAG retrieval
-- Insights dashboard
-- Plotly visualizations
-- GitHub dataset persistence
+NOTE: the modal/backdrop trick below relies on Streamlit's
+`st.container(key=...)` feature (Streamlit 1.31+), which puts a stable
+CSS class (`st-key-<key>`) on the container so we can position it with
+`position: fixed`. If you're on an older Streamlit, upgrade it
+(`pip install -U streamlit`) or the chat will fall back to plain inline
+layout instead of a floating modal.
 """
 
-# ==========================================================================
-# IMPORTS
-# ==========================================================================
-
-import base64
 import html
 import json
 import os
+import base64
+import io
+import requests
 from datetime import datetime
-from io import StringIO
 
 import pandas as pd
 import plotly.express as px
-import requests
 import streamlit as st
 import streamlit.components.v1 as components
 from huggingface_hub import InferenceClient
 
-
-# ==========================================================================
-# CONFIGURATION
-# ==========================================================================
-
+# --------------------------------------------------------------------------
+# CONFIG
+# --------------------------------------------------------------------------
 DATA_PATH = "data/messages.csv"
-
 COLUMNS = [
-    "id",
-    "timestamp",
-    "target_type",
-    "target_name",
-    "message",
-    "sender_name",
-    "sentiment",
-    "emoji_tag",
-    "keywords",
-    "suggestion",
-    "views",
+    "id", "timestamp", "target_type", "target_name", "message",
+    "sender_name", "sentiment", "emoji_tag", "keywords", "suggestion", "views",
     "note_color",
-    "meaning",
-    "emotion",
-    "secondary_emotion",
-    "intensity",
-    "analyzed_at",
+    # Per-note "Confession Analyzer" fields (cached so we don't re-call the
+    # API every time the same note is opened) — additive, older rows without
+    # these just show as "not yet analyzed" until someone opens them.
+    "meaning", "emotion", "secondary_emotion", "intensity", "analyzed_at",
 ]
 
-
-# ==========================================================================
-# EMOTION CATEGORIES
-# ==========================================================================
-
+# Controlled emotion vocabulary — used both by the per-note analyzer AND the
+# Insights "Emotions on the Wall" chart, so they always speak the same language.
 EMOTION_CATEGORIES = {
-    "Happiness": "😊",
-    "Sadness": "😢",
-    "Love": "❤️",
-    "Anger": "😡",
-    "Loneliness": "😔",
-    "Fear": "😨",
-    "Gratitude": "😌",
-    "Excitement": "🎉",
-    "Confusion": "😕",
-    "Heartbreak": "💔",
-    "Neutral": "😐",
-    "Support": "🤝",
-    "Surprise": "😮",
+    "Happiness": "😊", "Sadness": "😢", "Love": "❤️", "Anger": "😡",
+    "Loneliness": "😔", "Fear": "😨", "Gratitude": "😌", "Excitement": "🎉",
+    "Confusion": "😕", "Heartbreak": "💔", "Neutral": "😐",
+    "Support": "🤝", "Surprise": "😮",
 }
-
-
-# ==========================================================================
-# NOTE COLORS
-# ==========================================================================
 
 # name -> (picker emoji, paper color, tape color, ink color, soft ink color)
-
 NOTE_COLORS = {
-    "White": (
-        "⚪",
-        "#fffdf6",
-        "#e2d9c6",
-        "#3b2f38",
-        "#7a6a75",
-    ),
-    "Yellow": (
-        "🟡",
-        "#fff3b0",
-        "#ffd54a",
-        "#3b2f38",
-        "#7a6a75",
-    ),
-    "Orange": (
-        "🟠",
-        "#ffd9b0",
-        "#ffa94d",
-        "#3b2a1a",
-        "#7a5a3a",
-    ),
-    "Red": (
-        "🔴",
-        "#ffc9c9",
-        "#ff8787",
-        "#3b1f1f",
-        "#7a4a4a",
-    ),
-    "Pink": (
-        "🩷",
-        "#ffd6e3",
-        "#ff9ebd",
-        "#3b2f38",
-        "#7a6a75",
-    ),
-    "Purple": (
-        "🟣",
-        "#e4d7ff",
-        "#b79cff",
-        "#2f2a3b",
-        "#6a6480",
-    ),
-    "Blue": (
-        "🔵",
-        "#cfe6ff",
-        "#8ec5ff",
-        "#1f2f3b",
-        "#4a6072",
-    ),
-    "Teal": (
-        "🩵",
-        "#c6f0ea",
-        "#7fd8cc",
-        "#1f3b37",
-        "#4a726c",
-    ),
-    "Green": (
-        "🟢",
-        "#d5f5df",
-        "#8fdcaa",
-        "#1f3b2a",
-        "#4a725a",
-    ),
-    "Gray": (
-        "🩶",
-        "#e3e5e8",
-        "#aeb4bb",
-        "#2b2f33",
-        "#666c72",
-    ),
-    "Brown": (
-        "🟤",
-        "#c9a27a",
-        "#8b5e3c",
-        "#2d1f14",
-        "#5a4030",
-    ),
-    "Black": (
-        "⚫",
-        "#2b2b2f",
-        "#8a8a92",
-        "#f5f5f7",
-        "#b5b5bd",
-    ),
+    "White":  ("⚪", "#fffdf6", "#e2d9c6", "#3b2f38", "#7a6a75"),
+    "Yellow": ("🟡", "#fff3b0", "#ffd54a", "#3b2f38", "#7a6a75"),
+    "Orange": ("🟠", "#ffd9b0", "#ffa94d", "#3b2a1a", "#7a5a3a"),
+    "Red":    ("🔴", "#ffc9c9", "#ff8787", "#3b1f1f", "#7a4a4a"),
+    "Pink":   ("🩷", "#ffd6e3", "#ff9ebd", "#3b2f38", "#7a6a75"),
+    "Purple": ("🟣", "#e4d7ff", "#b79cff", "#2f2a3b", "#6a6480"),
+    "Blue":   ("🔵", "#cfe6ff", "#8ec5ff", "#1f2f3b", "#4a6072"),
+    "Teal":   ("🩵", "#c6f0ea", "#7fd8cc", "#1f3b37", "#4a726c"),
+    "Green":  ("🟢", "#d5f5df", "#8fdcaa", "#1f3b2a", "#4a725a"),
+    "Gray":   ("🩶", "#e3e5e8", "#aeb4bb", "#2b2f33", "#666c72"),
+    "Brown":  ("🟤", "#c9a27a", "#8b5e3c", "#2d1f14", "#5a4030"),
+    "Black":  ("⚫", "#2b2b2f", "#8a8a92", "#f5f5f7", "#b5b5bd"),
 }
-
 COLOR_NAMES = list(NOTE_COLORS.keys())
-
-FALLBACK_COLORS = [
-    color
-    for color in COLOR_NAMES
-    if color not in ("Black", "Brown")
-]
-
+# Older rows with no saved color cycle through the light colors only
+FALLBACK_COLORS = [c for c in COLOR_NAMES if c not in ("Black", "Brown")]
 TILTS = [-2.0, 1.5, -1.0, 2.0, -1.5, 1.0]
 
-
-# ==========================================================================
-# STREAMLIT CONFIG
-# ==========================================================================
-
-st.set_page_config(
-    page_title="Confession Wall",
-    page_icon="🎓",
-    layout="wide",
-)
-
-
-# ==========================================================================
-# HUGGING FACE GENAI
-# ==========================================================================
-
+# Any instruct-tuned chat model available on HF Inference Providers works.
+# This one is free-tier friendly and good at following JSON instructions.
 HF_MODEL = "meta-llama/Llama-3.1-8B-Instruct"
 
-HF_TOKEN = st.secrets.get(
-    "HF_TOKEN",
-    os.getenv("HF_TOKEN", ""),
+# --------------------------------------------------------------------------
+# GITHUB API CONFIG
+# --------------------------------------------------------------------------
+GITHUB_OWNER = st.secrets.get("GITHUB_OWNER", "")
+GITHUB_REPO = st.secrets.get("GITHUB_REPO", "")
+GITHUB_BRANCH = st.secrets.get("GITHUB_BRANCH", "main")
+GITHUB_FILE = st.secrets.get("GITHUB_FILE", DATA_PATH)
+GITHUB_TOKEN = st.secrets.get("GITHUB_TOKEN", "")
+
+GITHUB_API_URL = (
+    f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/contents/{GITHUB_FILE}"
 )
 
-client = InferenceClient(
-    token=HF_TOKEN
-)
+
+st.set_page_config(page_title="Confession Wall", page_icon="🎓", layout="wide")
+
+# --------------------------------------------------------------------------
+# GENAI CLIENT
+# --------------------------------------------------------------------------
+# Put your token in .streamlit/secrets.toml as:
+# HF_TOKEN = "hf_..."
+client = InferenceClient(token=st.secrets.get("HF_TOKEN", os.getenv("HF_TOKEN", "")))
 
 
 def _chat(prompt: str, temperature: float = 0.4) -> str:
-    """
-    Send a single prompt to the Hugging Face chat model.
-    """
-
-    if not HF_TOKEN:
-        raise RuntimeError(
-            "HF_TOKEN is not configured in Streamlit Secrets."
-        )
-
+    """Send a single-turn prompt to the Hugging Face chat model and return text."""
     response = client.chat_completion(
         model=HF_MODEL,
-        messages=[
-            {
-                "role": "user",
-                "content": prompt,
-            }
-        ],
+        messages=[{"role": "user", "content": prompt}],
         temperature=temperature,
         max_tokens=400,
     )
-
     return response.choices[0].message.content.strip()
 
 
-# ==========================================================================
-# INITIAL MESSAGE ANALYSIS
-# ==========================================================================
-
-def analyze_message(
-    message: str,
-    target_type: str,
-    target_name: str,
-) -> dict:
-    """
-    Analyze a newly posted message using GenAI.
-
-    Returns:
-        sentiment
-        emoji_tag
-        keywords
-        suggestion
-    """
-
+def analyze_message(message: str, target_type: str, target_name: str) -> dict:
+    """Send a message to the GenAI API and get back structured analysis."""
     prompt = f"""
 You are analyzing a farewell message written by a graduating student.
+The message is addressed to: {target_type} - {target_name}
 
-The message is addressed to:
-{target_type} - {target_name}
+Message: "{message}"
 
-Message:
-"{message}"
-
-Return ONLY a valid JSON object.
-
-Do not use markdown.
-Do not add explanations.
-Do not add text before or after the JSON.
-
-Use exactly these keys:
-
-"sentiment":
-Choose ONE:
-- Grateful
-- Nostalgic
-- Critical
-- Hopeful
-- Mixed
-- Neutral
-
-"emoji_tag":
-A short emoji plus a 1-2 word label.
-
-Example:
-"🌿 Grateful"
-
-"keywords":
-A list of up to 3 short theme keywords.
-
-Example:
-["teaching style", "patience"]
-
-"suggestion":
-If the message contains a suggestion, request, concern, or complaint
-for the school, summarize it in ONE short sentence.
-
-If there is no suggestion, return an empty string.
+Return ONLY a valid JSON object (no markdown, no extra text, no explanation) with
+these exact keys:
+- "sentiment": one word, one of [Grateful, Nostalgic, Critical, Hopeful, Mixed, Neutral]
+- "emoji_tag": a short emoji + 1-2 word label that fits the sentiment (e.g. "🌿 Grateful")
+- "keywords": a list of up to 3 short theme keywords (e.g. ["teaching style", "patience"])
+- "suggestion": if the message implies a suggestion or complaint for the school,
+  summarize it in ONE short sentence. If there is no suggestion, return an empty string.
 """
-
     try:
-        text = _chat(
-            prompt,
-            temperature=0.4
-        )
-
-        text = (
-            text
-            .replace("```json", "")
-            .replace("```", "")
-            .strip()
-        )
-
-        start = text.find("{")
-        end = text.rfind("}")
-
-        if start == -1 or end == -1:
-            raise ValueError(
-                "The AI did not return valid JSON."
-            )
-
+        text = _chat(prompt, temperature=0.4)
+        text = text.replace("```json", "").replace("```", "").strip()
+        # Some instruct models add a stray sentence before/after the JSON —
+        # grab just the {...} block to be safe.
+        start, end = text.find("{"), text.rfind("}")
         text = text[start:end + 1]
-
-        result = json.loads(text)
-
-        sentiment = result.get(
-            "sentiment",
-            "Neutral"
-        )
-
-        allowed_sentiments = {
-            "Grateful",
-            "Nostalgic",
-            "Critical",
-            "Hopeful",
-            "Mixed",
-            "Neutral",
-        }
-
-        if sentiment not in allowed_sentiments:
-            sentiment = "Neutral"
-
-        keywords = result.get(
-            "keywords",
-            []
-        )
-
-        if not isinstance(keywords, list):
-            keywords = []
-
-        return {
-            "sentiment": sentiment,
-            "emoji_tag": str(
-                result.get(
-                    "emoji_tag",
-                    ""
-                )
-            ),
-            "keywords": keywords[:3],
-            "suggestion": str(
-                result.get(
-                    "suggestion",
-                    ""
-                )
-            ),
-        }
-
+        return json.loads(text)
     except Exception as e:
-
-        st.error(
-            f"GenAI analysis failed: {e}"
-        )
-
+        st.error(f"GenAI analysis failed: {e}")
         return {
-            "sentiment": "Neutral",
-            "emoji_tag": "💭 Unanalyzed",
-            "keywords": [],
-            "suggestion": "",
+            "sentiment": "Neutral", "emoji_tag": "💭 Unanalyzed",
+            "keywords": [], "suggestion": "",
         }
 
 
-# ==========================================================================
-# LIGHTWEIGHT RAG RETRIEVAL
-# ==========================================================================
+def _normalize_text(value) -> str:
+    """Lowercase text for simple, deterministic wall-search matching."""
+    return str(value or "").strip().lower()
 
-def _retrieve_wall_context(
-    question: str,
-    df: pd.DataFrame,
-    limit: int = 12,
-):
+
+def _parse_question_intent(question: str) -> str:
+    """Lightweight routing so factual wall questions use deterministic retrieval."""
+    q = _normalize_text(question)
+    if any(x in q for x in ["latest", "most recent", "newest", "last note", "last confession"]):
+        return "latest"
+    if any(x in q for x in ["who posted", "who wrote", "who made", "who sent"]):
+        return "author_lookup"
+    if any(x in q for x in ["what did", "what does", "what was", "mean by", "meaning of"]):
+        return "note_meaning"
+    if any(x in q for x in ["how many", "count", "number of", "most common", "mostly talking", "talking about"]):
+        return "summary"
+    return "general"
+
+
+def _retrieve_wall_context(question: str, df: pd.DataFrame, limit: int = 12) -> tuple[str, dict]:
+    """Retrieve relevant wall records before asking the LLM to interpret them.
+
+    This is a lightweight RAG layer for the prototype: deterministic metadata/exact
+    matching first, then keyword overlap. It prevents old/irrelevant rows from
+    crowding the prompt and makes 'who posted the latest?' reliable.
     """
-    Lightweight RAG system.
-
-    Python retrieves relevant wall records first.
-    Hugging Face then interprets the retrieved records.
-    """
-
-    q = str(
-        question
-    ).strip().lower()
+    if df.empty:
+        return "No wall messages are currently available.", {}
 
     work = df.copy()
-
-    if work.empty:
-        return (
-            "No wall records are available.",
-            {"intent": "empty", "records": []},
-        )
-
-    work["_id"] = pd.to_numeric(
-        work["id"],
-        errors="coerce"
-    ).fillna(0)
-
+    work["_id"] = pd.to_numeric(work["id"], errors="coerce").fillna(0)
     work["_text"] = (
-        work["target_name"]
-        .fillna("")
-        .astype(str)
-        + " "
-        + work["message"]
-        .fillna("")
-        .astype(str)
-        + " "
-        + work["sender_name"]
-        .fillna("")
-        .astype(str)
-        + " "
-        + work["keywords"]
-        .fillna("")
-        .astype(str)
+        work["target_name"].fillna("").astype(str) + " " +
+        work["sender_name"].fillna("").astype(str) + " " +
+        work["message"].fillna("").astype(str) + " " +
+        work["keywords"].fillna("").astype(str)
     ).str.lower()
+    work = work.sort_values("_id", ascending=False)
 
-    latest_words = [
-        "latest",
-        "newest",
-        "most recent",
-        "recent",
-        "pinakabag-o",
-        "pinakalatest",
-        "karon",
-        "today",
-    ]
+    intent = _parse_question_intent(question)
+    q = _normalize_text(question)
 
-    author_words = [
-        "who posted",
-        "who wrote",
-        "author",
-        "sender",
-        "posted by",
-        "kinsa nag",
-        "kinsay nag",
-        "sino ang nag",
-    ]
+    # The highest ID is the newest posted row because save_message increments it.
+    if intent == "latest":
+        row = work.iloc[0]
+        context = json.dumps([{
+            "id": int(row["_id"]),
+            "posted_at": str(row.get("timestamp", "")),
+            "recipient": str(row.get("target_name", "")),
+            "author": str(row.get("sender_name", "Anonymous")),
+            "message": str(row.get("message", "")),
+            "note_color": str(row.get("note_color", "")),
+        }], ensure_ascii=False)
+        return context, {"intent": intent, "latest_id": int(row["_id"])}
 
-    meaning_words = [
-        "what does",
-        "what did",
-        "mean",
-        "meaning",
-        "meant",
-        "what is this saying",
-        "ano ibig sabihin",
-        "unsa pasabot",
-    ]
+    # Exact author/recipient lookup when a name appears in the question.
+    tokens = [t for t in q.replace("?", " ").replace(",", " ").split() if len(t) >= 3]
+    author_hits = pd.Series(False, index=work.index)
+    for token in tokens:
+        author_hits |= work["sender_name"].str.lower().eq(token)
+        author_hits |= work["target_name"].str.lower().eq(token)
 
-    # --------------------------------------------------------------
-    # LATEST MESSAGE
-    # --------------------------------------------------------------
-
-    if any(
-        word in q
-        for word in latest_words
-    ):
-
-        ordered = (
-            work
-            .sort_values(
-                "_id",
-                ascending=False
-            )
-            .head(limit)
-        )
-
-        intent = "latest"
-
+    if author_hits.any():
+        selected = work[author_hits].head(limit)
     else:
-
-        # ----------------------------------------------------------
-        # FIND KNOWN NAMES
-        # ----------------------------------------------------------
-
-        known_names = []
-
-        for column in (
-            "sender_name",
-            "target_name",
-        ):
-
-            for value in (
-                work[column]
-                .fillna("")
-                .astype(str)
-            ):
-
-                value = value.strip()
-
-                if (
-                    value
-                    and value.lower()
-                    not in {
-                        "anonymous",
-                        "nan",
-                    }
-                    and len(value) >= 2
-                ):
-
-                    known_names.append(value)
-
-        known_names = sorted(
-            set(known_names),
-            key=len,
-            reverse=True,
-        )
-
-        # ----------------------------------------------------------
-        # SCORE RECORDS
-        # ----------------------------------------------------------
-
+        # Keyword-overlap retrieval for meaning/topic questions.
+        stop = {"what", "does", "did", "this", "that", "mean", "about", "the", "note",
+                "message", "say", "says", "posted", "post", "who", "is", "are", "was",
+                "and", "for", "with", "from", "tell", "me", "please", "can", "you"}
+        q_words = {w for w in tokens if w not in stop}
         scored = []
-
-        for _, row in work.iterrows():
-
-            text_value = row["_text"]
-
-            score = 0
-            matched = []
-
-            for name in known_names:
-
-                if (
-                    name.lower() in q
-                    and name.lower() in text_value
-                ):
-
-                    score += 100
-                    matched.append(name)
-
-            tokens = (
-                q.replace("?", " ")
-                .replace(",", " ")
-                .replace(".", " ")
-                .split()
-            )
-
-            for token in tokens:
-
-                if len(token) >= 3 and token in text_value:
-                    score += 2
-                    matched.append(token)
-
-            scored.append(
-                (
-                    score,
-                    row["_id"],
-                    matched,
-                    row,
-                )
-            )
-
-        scored.sort(
-            key=lambda x: (
-                x[0],
-                x[1],
-            ),
-            reverse=True,
-        )
-
-        positive = [
-            item
-            for item in scored
-            if item[0] > 0
-        ]
-
-        if positive:
-
-            ordered = pd.DataFrame(
-                [
-                    item[3]
-                    for item in positive[:limit]
-                ]
-            )
-
-        else:
-
-            ordered = (
-                work
-                .sort_values(
-                    "_id",
-                    ascending=False
-                )
-                .head(limit)
-            )
-
-        if any(
-            word in q
-            for word in (
-                author_words
-                + meaning_words
-            )
-        ):
-
-            intent = "author_or_meaning"
-
-        else:
-
-            intent = "general"
-
-    # --------------------------------------------------------------
-    # BUILD CONTEXT
-    # --------------------------------------------------------------
+        for idx, row in work.iterrows():
+            text = _normalize_text(row["_text"])
+            score = sum(1 for word in q_words if word in text)
+            scored.append((score, row["_id"], idx))
+        scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
+        chosen_idx = [idx for score, _, idx in scored[:limit] if score > 0]
+        selected = work.loc[chosen_idx] if chosen_idx else work.head(limit)
 
     records = []
-
-    for _, row in ordered.iterrows():
-
-        try:
-            note_id = int(
-                float(
-                    row.get(
-                        "_id",
-                        0
-                    )
-                )
-            )
-
-        except Exception:
-            note_id = 0
-
-        records.append(
-            {
-                "id": note_id,
-                "timestamp": str(
-                    row.get(
-                        "timestamp",
-                        ""
-                    )
-                ),
-                "author": str(
-                    row.get(
-                        "sender_name",
-                        "Anonymous"
-                    )
-                ),
-                "recipient": str(
-                    row.get(
-                        "target_name",
-                        ""
-                    )
-                ),
-                "message": str(
-                    row.get(
-                        "message",
-                        ""
-                    )
-                ),
-                "color": str(
-                    row.get(
-                        "note_color",
-                        ""
-                    )
-                ),
-                "sentiment": str(
-                    row.get(
-                        "sentiment",
-                        ""
-                    )
-                ),
-                "emotion": str(
-                    row.get(
-                        "emotion",
-                        ""
-                    )
-                ),
-            }
-        )
-
-    context = json.dumps(
-        records,
-        ensure_ascii=False,
-        indent=2,
-    )
-
-    return context, {
-        "intent": intent,
-        "records": records,
-    }
+    for _, row in selected.iterrows():
+        records.append({
+            "id": int(row["_id"]),
+            "posted_at": str(row.get("timestamp", "")),
+            "recipient": str(row.get("target_name", "")),
+            "author": str(row.get("sender_name", "Anonymous")),
+            "message": str(row.get("message", "")),
+            "sentiment": str(row.get("sentiment", "")),
+            "emotion": str(row.get("emotion", "")),
+            "keywords": str(row.get("keywords", "")),
+            "note_color": str(row.get("note_color", "")),
+        })
+    return json.dumps(records, ensure_ascii=False), {"intent": intent, "selected_ids": [int(r["id"]) for r in records]}
 
 
-# ==========================================================================
-# CHATBOT
-# ==========================================================================
-
-def chatbot_answer(
-    question: str,
-    df: pd.DataFrame,
-    history=None,
-) -> str:
-
-    if history is None:
-        history = []
-
-    wall_context, meta = _retrieve_wall_context(
-        question,
-        df,
-        limit=12,
-    )
-
-    # --------------------------------------------------------------
-    # DETERMINISTIC LATEST ANSWER
-    # --------------------------------------------------------------
-
-    if (
-        meta.get("intent") == "latest"
-        and meta.get("records")
-    ):
-
-        latest = meta["records"][0]
-
-        author = (
-            latest["author"]
-            or "Anonymous"
-        )
-
-        recipient = latest["recipient"]
-
-        if recipient:
-
-            recipient_text = (
-                f" to {recipient}"
-            )
-
-        else:
-
-            recipient_text = ""
-
-        return (
-            f'The latest note was posted by '
-            f'**{author}**{recipient_text}. '
-            f'It says: "{latest["message"]}"'
-        )
-
-    # --------------------------------------------------------------
-    # RECENT CHAT CONTEXT
-    # --------------------------------------------------------------
-
+def chatbot_answer(question: str, df: pd.DataFrame, history: list | None = None) -> str:
+    """Answer wall questions using targeted retrieval + Hugging Face interpretation."""
+    wall_context, meta = _retrieve_wall_context(question, df, limit=12)
     convo = ""
+    if history:
+        for turn in history[-6:]:
+            role = "Student" if turn["role"] == "user" else "You"
+            convo += f"{role}: {turn['content']}\n"
 
-    for turn in history[-6:]:
-
-        role = (
-            "Student"
-            if turn["role"] == "user"
-            else "You"
-        )
-
-        convo += (
-            f"{role}: "
-            f"{turn['content']}\n"
-        )
-
-    # --------------------------------------------------------------
-    # AI PROMPT
-    # --------------------------------------------------------------
-
+    intent = meta.get("intent", "general")
     prompt = f"""
-You are the AI assistant inside a Confession Wall.
+You are the AI assistant inside a Confession Wall. Your job is to answer questions
+about the messages actually posted on the wall.
 
-Your job is to answer questions about messages actually posted
-on the wall.
+IMPORTANT RULES:
+1. Use the RETRIEVED WALL RECORDS below as the source of truth for wall questions.
+2. Never invent a name, message, date, or event that is not present in the records.
+3. 'author' means the person who posted/wrote the note. 'recipient' means who/what it was addressed to.
+4. For 'latest/newest/most recent' questions, use the record with the highest id in the retrieved latest record.
+5. For 'what does this mean?' questions, explain the message directly in 1-2 short sentences.
+6. Do NOT start with filler such as 'I understand what you mean', 'That's a pretty straightforward message',
+   'Let me analyze', or similar commentary.
+7. Be specific. If the user asks who posted it, give the author. If they ask what someone meant, explain the message.
+8. If the records do not support the answer, say that the wall data does not contain enough information.
+9. Keep answers concise unless the user asks for detail.
 
-SOURCE OF TRUTH:
-
-The RETRIEVED WALL RECORDS below were selected by the application
-from the current wall.
-
-Use those records for wall-related questions.
-
-Do NOT invent:
-- authors
-- messages
-- dates
-- recipients
-- relationships
-- events
-
-IMPORTANT:
-
-author = the person who posted or wrote the note.
-
-recipient = who or what the note was addressed to.
-
-If the user asks what a message means:
-Explain the message directly in 1-2 short sentences.
-
-Do NOT start with filler such as:
-"I understand..."
-"That's a straightforward message..."
-"Let me analyze..."
-
-If the user asks about a newly posted note:
-Use the newest relevant retrieved record.
-
-If evidence is insufficient:
-Say that you don't have enough information instead of guessing.
-
-Keep answers concise and specific.
-
-Markdown bold is allowed for names or important points.
+Detected question type: {intent}
 
 RETRIEVED WALL RECORDS:
-
 {wall_context}
 
-RECENT CHAT:
-
+RECENT CONVERSATION:
 {convo}
 
 USER QUESTION:
-
 {question}
 
 Answer directly.
 """
-
     try:
-
-        return _chat(
-            prompt,
-            temperature=0.25
-        )
-
+        return _chat(prompt, temperature=0.25)
     except Exception as e:
+        return f"Sorry, I couldn't process that: {e}"
 
-        return (
-            f"Sorry, I couldn't process that: {e}"
-        )
+def analyze_emotion(message: str) -> dict:
+    """Confession Analyzer: interpret ONE confession's meaning + emotion.
 
-
-# ==========================================================================
-# EMOTION ANALYZER
-# ==========================================================================
-
-def analyze_emotion(
-    message: str,
-) -> dict:
-
-    categories = ", ".join(
-        EMOTION_CATEGORIES.keys()
-    )
-
+    Separate from analyze_message() (which handles the sentiment/keywords/
+    suggestion shown when a note is first posted) — this powers the
+    click-to-view 'THE MEANING' + 'EMOTION REVIEW' panel instead.
+    """
+    categories = ", ".join(EMOTION_CATEGORIES.keys())
     prompt = f"""
-You are reading one short message posted on a farewell/message wall.
+You are reading one short message posted on a farewell/message wall app. Messages
+range from deep, heartfelt notes to simple casual greetings — read each one for
+what it actually is, don't over-interpret. Interpret ONLY what is reasonably
+supported by the text — do not invent events, relationships, names, or
+psychological diagnoses that weren't stated. If the message is ambiguous, use
+wording like "The message appears to express...". If the message is clearly
+neutral or just a casual greeting, say so plainly and use "Neutral" as the emotion.
 
-Messages can range from:
-- heartfelt notes
-- casual greetings
-- appreciation
-- complaints
-- simple messages
+IMPORTANT: Never use the word "confession" in your response — just call it "this
+message" or "this note". Many messages here are simple, casual, or friendly
+(like "hello, ma'am!") and calling them a "confession" would be a mismatched,
+overly dramatic label. Match your tone to the message: casual message → casual,
+brief read; heartfelt message → warmer, more thoughtful read.
 
-Read the message for what it actually says.
+Message: "{message}"
 
-Do not over-interpret.
-
-Do not invent:
-- events
-- relationships
-- names
-- psychological diagnoses
-
-If the message is ambiguous, use wording such as:
-
-"The message appears to express..."
-
-If the message is clearly neutral or simply a casual greeting,
-say so plainly and use "Neutral" as the emotion.
-
-IMPORTANT:
-
-Never use the word "confession" in your response.
-
-Call it:
-- "this message"
-- "this note"
-
-Match the tone to the actual message.
-
-Message:
-
-"{message}"
-
-Return ONLY a valid JSON object.
-
-Use exactly these keys:
-
-"meaning":
-ONE TO TWO short sentences explaining what the message appears
-to express.
-
-Go directly to the meaning.
-
-Do not use filler such as:
-"I understand..."
-"Let me analyze..."
-
-"emotion":
-Choose ONE category from this exact list:
-
-[{categories}]
-
-"secondary_emotion":
-Choose a second category from the same list,
-or "" if none fits.
-
-"intensity":
-Choose ONE:
-- Mild
-- Moderate
-- Strong
+Return ONLY a valid JSON object (no markdown, no extra text) with these exact keys:
+- "meaning": ONE to TWO short sentences on what the confession appears to express.
+  Go directly to the meaning — no filler like "I understand..." or "Let me analyze...".
+- "emotion": the single best-fitting category from this exact list: [{categories}]
+- "secondary_emotion": a second-best fitting category from the same list, or "" if none fits
+- "intensity": one word, one of [Mild, Moderate, Strong]
 """
-
     try:
-
-        text = _chat(
-            prompt,
-            temperature=0.3
-        )
-
-        text = (
-            text
-            .replace("```json", "")
-            .replace("```", "")
-            .strip()
-        )
-
-        start = text.find("{")
-        end = text.rfind("}")
-
-        if start == -1 or end == -1:
-            raise ValueError(
-                "Invalid JSON returned by AI."
-            )
-
-        text = text[
-            start:end + 1
-        ]
-
+        text = _chat(prompt, temperature=0.3)
+        text = text.replace("```json", "").replace("```", "").strip()
+        start, end = text.find("{"), text.rfind("}")
+        text = text[start:end + 1]
         result = json.loads(text)
-
-        emotion = result.get(
-            "emotion",
-            "Neutral"
-        )
-
-        secondary = result.get(
-            "secondary_emotion",
-            ""
-        )
-
-        intensity = result.get(
-            "intensity",
-            "Mild"
-        )
-
-        if emotion not in EMOTION_CATEGORIES:
-            emotion = "Neutral"
-
-        if secondary not in EMOTION_CATEGORIES:
-            secondary = ""
-
-        if intensity not in {
-            "Mild",
-            "Moderate",
-            "Strong",
-        }:
-            intensity = "Mild"
-
-        return {
-            "meaning": str(
-                result.get(
-                    "meaning",
-                    ""
-                )
-            ),
-            "emotion": emotion,
-            "secondary_emotion": secondary,
-            "intensity": intensity,
-        }
-
+        if result.get("emotion") not in EMOTION_CATEGORIES:
+            result["emotion"] = "Neutral"
+        if result.get("secondary_emotion") not in EMOTION_CATEGORIES:
+            result["secondary_emotion"] = ""
+        return result
     except Exception as e:
-
         return {
-            "meaning": (
-                f"Analysis unavailable: {e}"
-            ),
-            "emotion": "Neutral",
-            "secondary_emotion": "",
-            "intensity": "Mild",
+            "meaning": f"(Analysis unavailable: {e})",
+            "emotion": "Neutral", "secondary_emotion": "", "intensity": "Mild",
         }
 
 
-# ==========================================================================
-# GITHUB CONFIGURATION
-# ==========================================================================
-
-GITHUB_OWNER = st.secrets.get(
-    "GITHUB_OWNER",
-    "rcgbandoy-collab",
-)
-
-GITHUB_REPO = st.secrets.get(
-    "GITHUB_REPO",
-    "Confession-Wall",
-)
-
-GITHUB_BRANCH = st.secrets.get(
-    "GITHUB_BRANCH",
-    "main",
-)
-
-GITHUB_FILE = st.secrets.get(
-    "GITHUB_FILE",
-    "data/messages.csv",
-)
-
-GITHUB_TOKEN = st.secrets.get(
-    "GITHUB_TOKEN",
-    "",
-)
-
-GITHUB_API_URL = (
-    f"https://api.github.com/repos/"
-    f"{GITHUB_OWNER}/"
-    f"{GITHUB_REPO}/contents/"
-    f"{GITHUB_FILE}"
-)
-
-
-# ==========================================================================
-# GITHUB HELPERS
-# ==========================================================================
-
-def github_headers():
-
+# --------------------------------------------------------------------------
+# DATA HELPERS
+# --------------------------------------------------------------------------
+def github_headers() -> dict:
     return {
-        "Authorization": (
-            f"Bearer {GITHUB_TOKEN}"
-        ),
-        "Accept": (
-            "application/vnd.github+json"
-        ),
-        "X-GitHub-Api-Version": (
-            "2022-11-28"
-        ),
+        "Authorization": f"Bearer {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
     }
 
 
-# ==========================================================================
-# DATA LOADING
-# ==========================================================================
-
 def load_data() -> pd.DataFrame:
-    """
-    Load the latest messages.csv from GitHub.
-
-    If GitHub cannot be reached,
-    fall back to the local dataset.
-    """
-
+    """Load the CSV from GitHub when configured; otherwise use the local CSV."""
     df = None
 
-    # --------------------------------------------------------------
-    # TRY GITHUB
-    # --------------------------------------------------------------
-
-    if GITHUB_TOKEN:
-
+    if GITHUB_OWNER and GITHUB_REPO and GITHUB_TOKEN:
         try:
-
             response = requests.get(
                 GITHUB_API_URL,
                 headers=github_headers(),
-                params={
-                    "ref": GITHUB_BRANCH
-                },
-                timeout=20,
+                params={"ref": GITHUB_BRANCH},
+                timeout=15,
             )
-
-            if response.status_code == 200:
-
-                file_data = response.json()
-
-                encoded_content = (
-                    file_data["content"]
-                )
-
-                csv_bytes = base64.b64decode(
-                    encoded_content
-                )
-
-                csv_text = csv_bytes.decode(
-                    "utf-8"
-                )
-
-                df = pd.read_csv(
-                    StringIO(csv_text)
-                )
-
+            response.raise_for_status()
+            content = base64.b64decode(response.json()["content"]).decode("utf-8")
+            df = pd.read_csv(io.StringIO(content))
         except Exception:
             df = None
 
-    # --------------------------------------------------------------
-    # LOCAL FALLBACK
-    # --------------------------------------------------------------
-
     if df is None:
+        df = pd.read_csv(DATA_PATH)
 
-        try:
-
-            df = pd.read_csv(
-                DATA_PATH
-            )
-
-        except Exception:
-
-            df = pd.DataFrame(
-                columns=COLUMNS
-            )
-
-    # --------------------------------------------------------------
-    # ADD MISSING COLUMNS
-    # --------------------------------------------------------------
-
-    for column in COLUMNS:
-
-        if column not in df.columns:
-            df[column] = ""
-
-    # --------------------------------------------------------------
-    # CLEAN MESSAGE
-    # --------------------------------------------------------------
-
-    df["message"] = (
-        df["message"]
-        .fillna("")
-        .astype(str)
-        .str.strip()
-    )
-
-    df = df[
-        df["message"] != ""
-    ].copy()
-
-    # --------------------------------------------------------------
-    # CLEAN SENDER
-    # --------------------------------------------------------------
-
-    df["sender_name"] = (
-        df["sender_name"]
-        .fillna("Anonymous")
-        .astype(str)
-        .str.strip()
-    )
-
-    df.loc[
-        df["sender_name"] == "",
-        "sender_name"
-    ] = "Anonymous"
-
+    for col in COLUMNS:
+        if col not in df.columns:
+            df[col] = ""
+    df["message"] = df["message"].fillna("").astype(str).str.strip()
+    df = df[df["message"] != ""]
+    df["sender_name"] = df["sender_name"].fillna("Anonymous")
+    df["sender_name"] = df["sender_name"].replace("", "Anonymous")
     return df
 
 
-# ==========================================================================
-# SAVE DATASET TO GITHUB
-# ==========================================================================
-
-def save_dataframe_to_github(
-    df: pd.DataFrame,
-    commit_message: str,
-) -> bool:
-
-    if not GITHUB_TOKEN:
-
-        st.error(
-            "GitHub connection is not configured. "
-            "Please check Streamlit Secrets."
-        )
-
+def save_dataframe_to_github(df: pd.DataFrame, commit_message: str) -> bool:
+    """Upload the current CSV to GitHub using the Contents API."""
+    if not (GITHUB_OWNER and GITHUB_REPO and GITHUB_TOKEN):
         return False
 
     try:
-
-        # ----------------------------------------------------------
-        # GET CURRENT FILE SHA
-        # ----------------------------------------------------------
-
-        response = requests.get(
+        current = requests.get(
             GITHUB_API_URL,
             headers=github_headers(),
-            params={
-                "ref": GITHUB_BRANCH
-            },
-            timeout=20,
+            params={"ref": GITHUB_BRANCH},
+            timeout=15,
         )
+        current.raise_for_status()
+        sha = current.json()["sha"]
 
-        if response.status_code != 200:
-
-            st.error(
-                "Could not read the GitHub dataset.\n\n"
-                f"Status: {response.status_code}\n"
-                f"{response.text}"
-            )
-
-            return False
-
-        current_file = response.json()
-
-        current_sha = current_file[
-            "sha"
-        ]
-
-        # ----------------------------------------------------------
-        # CONVERT DATAFRAME TO CSV
-        # ----------------------------------------------------------
-
-        csv_content = df.to_csv(
-            index=False
-        )
-
-        encoded_content = base64.b64encode(
-            csv_content.encode("utf-8")
+        content = base64.b64encode(
+            df.to_csv(index=False).encode("utf-8")
         ).decode("utf-8")
 
-        # ----------------------------------------------------------
-        # UPDATE GITHUB
-        # ----------------------------------------------------------
-
-        payload = {
-            "message": commit_message,
-            "content": encoded_content,
-            "sha": current_sha,
-            "branch": GITHUB_BRANCH,
-        }
-
-        update_response = requests.put(
+        response = requests.put(
             GITHUB_API_URL,
             headers=github_headers(),
-            json=payload,
-            timeout=20,
+            json={
+                "message": commit_message,
+                "content": content,
+                "sha": sha,
+                "branch": GITHUB_BRANCH,
+            },
+            timeout=15,
         )
-
-        if update_response.status_code in (
-            200,
-            201,
-        ):
-
-            # Update local copy too.
-            os.makedirs(
-                os.path.dirname(DATA_PATH),
-                exist_ok=True,
-            )
-
-            df.to_csv(
-                DATA_PATH,
-                index=False
-            )
-
-            return True
-
-        st.error(
-            "GitHub dataset update failed.\n\n"
-            f"Status: {update_response.status_code}\n"
-            f"{update_response.text}"
-        )
-
-        return False
-
-    except Exception as e:
-
-        st.error(
-            f"GitHub connection error: {e}"
-        )
-
+        response.raise_for_status()
+        return True
+    except Exception:
         return False
 
 
-# ==========================================================================
-# SAVE NEW MESSAGE
-# ==========================================================================
-
-def save_message(
-    row: dict,
-) -> bool:
-
+def save_message(row: dict):
     df = load_data()
-
-    # --------------------------------------------------------------
-    # CREATE NEW ID
-    # --------------------------------------------------------------
-
-    if len(df):
-
-        numeric_ids = (
-            pd.to_numeric(
-                df["id"],
-                errors="coerce",
-            )
-            .dropna()
-        )
-
-        if not numeric_ids.empty:
-
-            new_id = (
-                int(
-                    numeric_ids.max()
-                )
-                + 1
-            )
-
-        else:
-
-            new_id = 1
-
-    else:
-
-        new_id = 1
-
+    new_id = int(df["id"].max()) + 1 if len(df) else 1
     row["id"] = new_id
-
-    # --------------------------------------------------------------
-    # ADD MESSAGE
-    # --------------------------------------------------------------
-
-    updated_df = pd.concat(
-        [
-            df,
-            pd.DataFrame([row]),
-        ],
-        ignore_index=True,
-    )
-
-    # --------------------------------------------------------------
-    # SAVE
-    # --------------------------------------------------------------
-
-    return save_dataframe_to_github(
-        updated_df,
-        f"Add confession message #{new_id}",
-    )
+    df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
+    df.to_csv(DATA_PATH, index=False)
+    save_dataframe_to_github(df, "Add new confession message")
 
 
-# ==========================================================================
-# SAVE AI EMOTION ANALYSIS
-# ==========================================================================
-
-def update_message_analysis(
-    note_id: int,
-    analysis: dict,
-):
-
+def update_message_analysis(note_id: int, analysis: dict):
+    """Persist a note's emotion analysis and update GitHub when configured."""
     df = load_data()
-
-    numeric_ids = pd.to_numeric(
-        df["id"],
-        errors="coerce",
-    )
-
-    mask = (
-        numeric_ids
-        == note_id
-    )
-
+    mask = df["id"] == note_id
     if not mask.any():
-        return False
-
-    df.loc[
-        mask,
-        "meaning"
-    ] = analysis.get(
-        "meaning",
-        "",
-    )
-
-    df.loc[
-        mask,
-        "emotion"
-    ] = analysis.get(
-        "emotion",
-        "Neutral",
-    )
-
-    df.loc[
-        mask,
-        "secondary_emotion"
-    ] = analysis.get(
-        "secondary_emotion",
-        "",
-    )
-
-    df.loc[
-        mask,
-        "intensity"
-    ] = analysis.get(
-        "intensity",
-        "Mild",
-    )
-
-    df.loc[
-        mask,
-        "analyzed_at"
-    ] = datetime.now().strftime(
-        "%Y-%m-%d %H:%M"
-    )
-
-    return save_dataframe_to_github(
-        df,
-        f"Update AI analysis for note #{note_id}",
-    )
+        return
+    df.loc[mask, "meaning"] = analysis.get("meaning", "")
+    df.loc[mask, "emotion"] = analysis.get("emotion", "Neutral")
+    df.loc[mask, "secondary_emotion"] = analysis.get("secondary_emotion", "")
+    df.loc[mask, "intensity"] = analysis.get("intensity", "Mild")
+    df.loc[mask, "analyzed_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+    df.to_csv(DATA_PATH, index=False)
+    save_dataframe_to_github(df, f"Analyze confession #{note_id}")
 
 
-# ==========================================================================
-# GET OR GENERATE EMOTION ANALYSIS
-# ==========================================================================
+def get_or_analyze_emotion(row: pd.Series) -> dict:
+    """Return the cached emotion analysis for a note, or run it once and save it.
 
-def get_or_analyze_emotion(
-    row: pd.Series,
-) -> dict:
-
-    saved_emotion = str(
-        row.get(
-            "emotion",
-            ""
-        )
-    ).strip()
-
-    if saved_emotion:
-
+    Per the spec: don't re-call the API every time the same note is opened —
+    only analyze if there's no saved result yet.
+    """
+    if str(row.get("emotion", "")).strip():
         return {
-            "meaning": row.get(
-                "meaning",
-                ""
-            ),
-            "emotion": row.get(
-                "emotion",
-                "Neutral"
-            ),
-            "secondary_emotion": row.get(
-                "secondary_emotion",
-                ""
-            ),
-            "intensity": row.get(
-                "intensity",
-                "Mild"
-            ),
+            "meaning": row.get("meaning", ""),
+            "emotion": row.get("emotion", "Neutral"),
+            "secondary_emotion": row.get("secondary_emotion", ""),
+            "intensity": row.get("intensity", "Mild"),
         }
-
-    result = analyze_emotion(
-        row["message"]
-    )
-
-    update_message_analysis(
-        int(
-            float(
-                row["id"]
-            )
-        ),
-        result,
-    )
-
+    result = analyze_emotion(row["message"])
+    update_message_analysis(int(row["id"]), result)
     return result
 
 
-# ==========================================================================
-# GLOBAL STYLING
-# ==========================================================================
-
-st.markdown(
-    """
+# --------------------------------------------------------------------------
+# STYLING (paper-note wall + purple floating chat MODAL with blurred backdrop)
+# --------------------------------------------------------------------------
+st.markdown("""
 <style>
+@import url('https://fonts.googleapis.com/css2?family=Caveat:wght@500;700&family=Quicksand:wght@400;600;700&display=swap');
 
-@import url(
-'https://fonts.googleapis.com/css2?family=Caveat:wght@500;700&family=Quicksand:wght@400;600;700&display=swap'
-);
-
-
-/* ================================================================
-   PAPER WALL
-   ================================================================ */
-
-.wall {
-    column-count: 3;
-    column-gap: 26px;
-    padding: 12px 6px 30px;
-}
-
-@media (max-width: 900px) {
-    .wall {
-        column-count: 2;
-    }
-}
-
-@media (max-width: 600px) {
-    .wall {
-        column-count: 1;
-    }
-}
-
-
-/* ================================================================
-   NOTE
-   ================================================================ */
+/* ---------- Paper wall ---------- */
+.wall { column-count: 3; column-gap: 26px; padding: 12px 6px 30px; }
+@media (max-width: 900px) { .wall { column-count: 2; } }
+@media (max-width: 600px) { .wall { column-count: 1; } }
 
 .note {
-
-    --tilt: 0deg;
-    --tape: #ddd;
-    --ink: #333;
-    --sub: #777;
-
+    --tilt: 0deg; --tape: #ddd; --ink: #333; --sub: #777;
     position: relative;
-
-    display: inline-block;
-
-    width: 100%;
-
-    break-inside: avoid;
-
-    box-sizing: border-box;
-
-    margin: 0 0 30px;
-
-    padding: 30px 24px 18px;
-
-    border-radius:
-        6px 6px 18px 6px;
-
-    box-shadow:
-        0 6px 16px
-        rgba(0, 0, 0, 0.20);
-
-    transform:
-        rotate(var(--tilt));
-
-    transition:
-        transform .25s ease,
-        box-shadow .25s ease;
-
-    text-align: left;
-
-    overflow-wrap: anywhere;
-
-    background-image:
-        repeating-linear-gradient(
-            transparent 0 27px,
-            rgba(128,128,128,0.16)
-            27px 28px
-        );
+    display: inline-block; width: 100%;
+    break-inside: avoid; box-sizing: border-box;
+    margin: 0 0 30px; padding: 30px 24px 18px;
+    border-radius: 6px 6px 18px 6px;
+    box-shadow: 0 6px 16px rgba(0, 0, 0, 0.20);
+    transform: rotate(var(--tilt));
+    transition: transform .25s ease, box-shadow .25s ease;
+    text-align: left; overflow-wrap: anywhere;
+    background-image: repeating-linear-gradient(transparent 0 27px, rgba(128,128,128,0.16) 27px 28px);
 }
-
-.note:hover {
-
-    transform:
-        rotate(0deg)
-        translateY(-6px)
-        scale(1.02);
-
-    box-shadow:
-        0 14px 28px
-        rgba(0,0,0,.28);
-}
-
+.note:hover { transform: rotate(0deg) translateY(-6px) scale(1.02); box-shadow: 0 14px 28px rgba(0,0,0,.28); }
 .note::before {
-
-    content: '';
-
-    position: absolute;
-
-    top: -12px;
-
-    left: 50%;
-
-    width: 84px;
-
-    height: 24px;
-
-    transform:
-        translateX(-50%)
-        rotate(-3deg);
-
-    background:
-        var(--tape);
-
-    opacity: .8;
-
-    border-radius: 3px;
+    content: ''; position: absolute; top: -12px; left: 50%;
+    width: 84px; height: 24px; transform: translateX(-50%) rotate(-3deg);
+    background: var(--tape); opacity: .8; border-radius: 3px;
 }
+.note-to { font-family: 'Quicksand', sans-serif; font-weight: 700; font-size: 13px;
+           letter-spacing: 1px; text-transform: uppercase; color: var(--sub); }
+.note-msg { font-family: 'Caveat', cursive; font-size: 25px; line-height: 28px; color: var(--ink); margin: 14px 0; }
+.note-tag { display: inline-block; background: rgba(128,128,128,.22); color: var(--ink);
+            padding: 3px 12px; border-radius: 999px; font-size: 12px; font-family: 'Quicksand', sans-serif;
+            margin-top: 10px; }
+.note-from { font-family: 'Caveat', cursive; font-size: 21px; color: var(--sub); margin-top: 10px; }
+.note-date { font-family: 'Quicksand', sans-serif; font-size: 11px; color: var(--sub); margin-top: 4px; }
 
-.note-to {
+.single { max-width: 420px; margin: 24px auto; }
 
-    font-family:
-        'Quicksand',
-        sans-serif;
+/* ---------- Floating purple AI chat: trigger button ---------- */
+/* Position/size/drag is now fully controlled by _CHAT_HEAD_JS (inline styles),
+   so no CSS positioning rules here — avoids fighting with the JS-driven drag. */
 
-    font-weight: 700;
-
-    font-size: 13px;
-
-    letter-spacing: 1px;
-
-    text-transform: uppercase;
-
-    color: var(--sub);
-}
-
-.note-msg {
-
-    font-family:
-        'Caveat',
-        cursive;
-
-    font-size: 25px;
-
-    line-height: 28px;
-
-    color: var(--ink);
-
-    margin: 14px 0;
-}
-
-.note-tag {
-
-    display: inline-block;
-
-    background:
-        rgba(128,128,128,.22);
-
-    color: var(--ink);
-
-    padding:
-        3px 12px;
-
-    border-radius:
-        999px;
-
-    font-size: 12px;
-
-    font-family:
-        'Quicksand',
-        sans-serif;
-
-    margin-top: 10px;
-}
-
-.note-from {
-
-    font-family:
-        'Caveat',
-        cursive;
-
-    font-size: 21px;
-
-    color: var(--sub);
-
-    margin-top: 10px;
-}
-
-.note-date {
-
-    font-family:
-        'Quicksand',
-        sans-serif;
-
-    font-size: 11px;
-
-    color: var(--sub);
-
-    margin-top: 4px;
-}
-
-.single {
-
-    max-width: 420px;
-
-    margin: 24px auto;
-}
-
-
-/* ================================================================
-   CHAT BACKDROP
-   ================================================================ */
-
-.st-key-chat_overlay,
-.st-key-note_overlay {
-
-    position: fixed !important;
-
-    inset: 0 !important;
-
-    z-index: 9998 !important;
-
-    background:
-        rgba(20, 10, 30, .50) !important;
-
-    backdrop-filter:
-        blur(7px) !important;
-
-    -webkit-backdrop-filter:
-        blur(7px) !important;
-
-    display: flex !important;
-
-    align-items: center !important;
-
-    justify-content: center !important;
-
+/* ---------- Full-screen dim + blur backdrop (the whole site sits behind this) ---------- */
+.st-key-chat_overlay {
+    position: fixed !important; inset: 0 !important; z-index: 9998 !important;
+    background: rgba(20, 10, 30, .45) !important;
+    backdrop-filter: blur(6px) !important; -webkit-backdrop-filter: blur(6px) !important;
+    display: flex !important; align-items: center !important; justify-content: center !important;
     padding: 20px !important;
-
-    overflow-y: auto !important;
 }
 
-
-/* ================================================================
-   OUTSIDE CLICK
-   ================================================================ */
-
-.st-key-chat_backdrop_close,
-.st-key-note_backdrop_close {
-
-    position: fixed !important;
-
-    inset: 0 !important;
-
-    z-index: 1 !important;
-
-    padding: 0 !important;
-
-    margin: 0 !important;
-
-    pointer-events: auto !important;
-}
-
-.st-key-chat_backdrop_close button,
-.st-key-note_backdrop_close button {
-
-    position: absolute !important;
-
-    inset: 0 !important;
-
-    width: 100% !important;
-
-    height: 100% !important;
-
-    opacity: 0 !important;
-
-    background:
-        transparent !important;
-
-    border: 0 !important;
-
-    cursor: default !important;
-}
-
-
-/* ================================================================
-   CHAT MODAL
-   ================================================================ */
-
+/* ---------- The chat modal: NO white box — just the blurred backdrop, messages float on it ---------- */
 .st-key-chat_modal {
-
-    position: relative !important;
-
-    z-index: 2 !important;
-
-    background:
-        transparent !important;
-
-    border-radius: 0 !important;
-
-    width: 460px !important;
-
-    max-width: 92vw !important;
-
-    max-height: 82vh !important;
-
+    background: transparent !important; border-radius: 0 !important;
+    width: 460px !important; max-width: 92vw !important; max-height: 82vh !important;
     box-shadow: none !important;
-
-    display: flex !important;
-
-    flex-direction: column !important;
-
-    overflow: hidden !important;
-
-    animation:
-        cwOpen .18s ease-out;
+    display: flex !important; flex-direction: column !important; overflow: hidden !important;
+    animation: cwOpen .18s ease-out;
 }
-
 @keyframes cwOpen {
-
-    from {
-        opacity: 0;
-        transform:
-            translateY(10px)
-            scale(.97);
-    }
-
-    to {
-        opacity: 1;
-        transform:
-            translateY(0)
-            scale(1);
-    }
+    from { opacity: 0; transform: translateY(10px) scale(.97); }
+    to   { opacity: 1; transform: translateY(0) scale(1); }
 }
-
-
-/* ================================================================
-   CHAT HEADER
-   ================================================================ */
 
 .st-key-chat_header {
-
-    background:
-        transparent !important;
-
-    padding:
-        6px 4px 6px 18px !important;
+    background: transparent !important;
+    padding: 6px 4px 6px 18px !important;
 }
-
 .st-key-chat_header button {
-
-    background:
-        rgba(0,0,0,.25) !important;
-
-    border: none !important;
-
-    box-shadow: none !important;
-
-    color: #fff !important;
-
-    font-size: 16px !important;
-
-    width: 34px !important;
-
-    height: 34px !important;
-
-    margin-top: 2px !important;
-
-    border-radius: 50% !important;
+    background: rgba(0,0,0,.25) !important; border: none !important; box-shadow: none !important;
+    color: #fff !important; font-size: 16px !important; width: 34px !important; height: 34px !important;
+    margin-top: 2px !important; border-radius: 50% !important;
+}
+.st-key-chat_header [data-testid="stButton"] button {
+    font-family: 'Quicksand', sans-serif !important; font-size: 11px !important;
 }
 
-.cw-header-title {
+.cw-header-title { font-family: 'Quicksand', sans-serif; font-weight: 700; font-size: 15px; color: #fff; padding-top: 10px;
+                    text-shadow: 0 1px 4px rgba(0,0,0,.5); }
+.cw-header-sub { font-family: 'Quicksand', sans-serif; font-size: 12px; color: rgba(255,255,255,.85); margin-top: 2px; padding-bottom: 10px;
+                 text-shadow: 0 1px 4px rgba(0,0,0,.5); }
 
-    font-family:
-        'Quicksand',
-        sans-serif;
+.cw-body { padding: 12px 14px 4px; max-height: 46vh; overflow-y: auto; scroll-behavior: smooth; }
+.cw-row { display: flex; margin: 7px 0; animation: cwIn .2s ease; }
+.cw-row.ai { justify-content: flex-start; }
+.cw-row.user { justify-content: flex-end; }
+@keyframes cwIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
 
-    font-weight: 700;
-
-    font-size: 15px;
-
-    color: #fff;
-
-    padding-top: 10px;
-
-    text-shadow:
-        0 1px 4px
-        rgba(0,0,0,.5);
-}
-
-.cw-header-sub {
-
-    font-family:
-        'Quicksand',
-        sans-serif;
-
-    font-size: 12px;
-
-    color:
-        rgba(255,255,255,.85);
-
-    margin-top: 2px;
-
-    padding-bottom: 10px;
-
-    text-shadow:
-        0 1px 4px
-        rgba(0,0,0,.5);
-}
-
-
-/* ================================================================
-   CHAT BODY
-   ================================================================ */
-
-.cw-body {
-
-    padding:
-        12px 14px 4px;
-
-    max-height: 46vh;
-
-    overflow-y: auto;
-
-    scroll-behavior:
-        smooth;
-}
-
-.cw-row {
-
-    display: flex;
-
-    margin: 7px 0;
-
-    animation:
-        cwIn .2s ease;
-}
-
-.cw-row.ai {
-    justify-content:
-        flex-start;
-}
-
-.cw-row.user {
-    justify-content:
-        flex-end;
-}
-
-@keyframes cwIn {
-
-    from {
-        opacity: 0;
-        transform:
-            translateY(6px);
-    }
-
-    to {
-        opacity: 1;
-        transform:
-            translateY(0);
-    }
-}
-
-.cw-label {
-
-    font-family:
-        'Quicksand',
-        sans-serif;
-
-    font-size: 10px;
-
-    color:
-        rgba(255,255,255,.8);
-
-    margin:
-        0 4px 2px;
-
-    text-align: right;
-}
-
-.cw-row.ai .cw-label {
-    text-align: left;
-}
-
-
-/* ================================================================
-   CHAT BUBBLES
-   ================================================================ */
+.cw-label { font-family: 'Quicksand', sans-serif; font-size: 10px; color: rgba(255,255,255,.8); margin: 0 4px 2px; text-align: right; }
+.cw-row.ai .cw-label { text-align: left; }
 
 .cw-bubble {
-
-    max-width: 78%;
-
-    padding:
-        9px 14px;
-
-    border-radius:
-        16px;
-
-    font-family:
-        'Quicksand',
-        sans-serif;
-
-    font-size: 14px;
-
-    line-height: 1.4;
-
-    box-shadow:
-        0 2px 6px
-        rgba(0,0,0,.25);
-
-    overflow-wrap:
-        anywhere;
+    max-width: 78%; padding: 9px 14px; border-radius: 16px;
+    font-family: 'Quicksand', sans-serif; font-size: 14px; line-height: 1.4;
+    box-shadow: 0 2px 6px rgba(0,0,0,.25);
 }
-
-.cw-bubble.ai {
-
-    background:
-        rgba(120,120,132,.92);
-
-    color: #fff;
-
-    border-bottom-left-radius:
-        4px;
-}
-
-.cw-bubble.user {
-
-    background:
-        #2563eb;
-
-    color: #fff;
-
-    border-bottom-right-radius:
-        4px;
-}
-
-
-/* ================================================================
-   TYPING INDICATOR
-   ================================================================ */
+/* Default AI bubble = grey. When the AI mentions a note's author, its accent
+   color (from that note) is applied inline, overriding this grey. */
+.cw-bubble.ai { background: rgba(120,120,132,.92); color: #fff; border-bottom-left-radius: 4px; }
+.cw-bubble.user { background: #2563eb; color: #fff; border-bottom-right-radius: 4px; }
 
 .cw-typing {
-
-    display: inline-flex;
-
-    gap: 4px;
-
-    padding:
-        12px 14px;
-
-    background:
-        rgba(120,120,132,.92);
-
-    border-radius:
-        16px;
-
-    border-bottom-left-radius:
-        4px;
+    display: inline-flex; gap: 4px; padding: 12px 14px;
+    background: rgba(120,120,132,.92); border-radius: 16px; border-bottom-left-radius: 4px;
 }
-
 .cw-typing span {
-
-    width: 6px;
-
-    height: 6px;
-
-    border-radius: 50%;
-
-    background: #fff;
-
-    animation:
-        cwBlink 1.2s
-        infinite ease-in-out;
+    width: 6px; height: 6px; border-radius: 50%; background: #fff;
+    animation: cwBlink 1.2s infinite ease-in-out;
 }
+.cw-typing span:nth-child(2) { animation-delay: .2s; }
+.cw-typing span:nth-child(3) { animation-delay: .4s; }
+@keyframes cwBlink { 0%, 80%, 100% { opacity: .3; } 40% { opacity: 1; } }
 
-.cw-typing span:nth-child(2) {
-    animation-delay: .2s;
-}
-
-.cw-typing span:nth-child(3) {
-    animation-delay: .4s;
-}
-
-@keyframes cwBlink {
-
-    0%,
-    80%,
-    100% {
-        opacity: .3;
-    }
-
-    40% {
-        opacity: 1;
-    }
-}
-
-
-/* ================================================================
-   CHAT INPUT
-   ================================================================ */
-
-.st-key-chat_inputbar {
-
-    border-top:
-        none !important;
-
-    padding:
-        10px 12px !important;
-
-    background:
-        transparent !important;
-}
-
+.st-key-chat_inputbar { border-top: none !important; padding: 10px 12px !important; background: transparent !important; }
 .st-key-chat_inputbar input {
-
-    border-radius:
-        999px !important;
-
-    border:
-        none !important;
-
-    padding:
-        8px 14px !important;
-
-    font-family:
-        'Quicksand',
-        sans-serif !important;
-
-    background:
-        rgba(255,255,255,.92) !important;
-
-    color: #111 !important;
+    border-radius: 999px !important; border: none !important;
+    padding: 8px 14px !important; font-family: 'Quicksand', sans-serif !important;
+    background: rgba(255,255,255,.92) !important; color: #111 !important;
 }
-
-.st-key-chat_inputbar button {
-
-    background:
-        #2563eb !important;
-
-    color: #fff !important;
-
-    border:
-        none !important;
-
-    border-radius:
-        50% !important;
-
-    width: 36px !important;
-
-    height: 36px !important;
-
+.st-key-chat_inputbar button[kind="formSubmit"], .st-key-chat_inputbar button {
+    background: #2563eb !important; color: #fff !important; border: none !important;
+    border-radius: 50% !important; width: 36px !important; height: 36px !important;
     padding: 0 !important;
 }
 
-
-/* ================================================================
-   CLICKABLE NOTES
-   ================================================================ */
-
-[class*="st-key-note_wrap_"] {
-
-    position:
-        relative !important;
-
-    margin-bottom:
-        30px !important;
+/* ---------- Clickable note cards on the wall ---------- */
+/* A real (guaranteed-clickable) button, styled to blend into the bottom of
+   the note itself — same rounded corners, no border, no gap — so it reads
+   as part of the note rather than a separate UI control. Its background
+   color is set per-note via an inline style (matches that note's paper color). */
+[class*="st-key-note_wrap_"] { margin-bottom: 30px; }
+[class*="st-key-note_wrap_"] .note { margin-bottom: 0; border-radius: 6px 6px 0 0; box-shadow: none; }
+[class*="st-key-note_wrap_"] [data-testid="stButton"] { margin-top: 0; }
+[class*="st-key-note_wrap_"] [data-testid="stButton"] button {
+    width: 100% !important; border: none !important; border-radius: 0 0 12px 12px !important;
+    box-shadow: 0 6px 16px rgba(0,0,0,.2) !important;
+    font-family: 'Quicksand', sans-serif !important; font-size: 12px !important;
+    padding: 8px !important; opacity: .85;
 }
+[class*="st-key-note_wrap_"] [data-testid="stButton"] button:hover { opacity: 1; }
 
-[class*="st-key-note_wrap_"] .note {
-
-    margin-bottom:
-        0 !important;
+/* ---------- Entire paper note is clickable ---------- */
+[class*="st-key-note_wrap_"] { position: relative !important; }
+[class*="st-key-note_wrap_"] [data-testid="stButton"] {
+    position: absolute !important; inset: 0 !important; z-index: 20 !important;
+    margin: 0 !important; padding: 0 !important; height: 100% !important;
 }
-
-[class*="st-key-note_wrap_"]
-[data-testid="stButton"] {
-
-    position:
-        absolute !important;
-
-    inset:
-        0 !important;
-
-    z-index:
-        20 !important;
-
-    margin:
-        0 !important;
-
-    padding:
-        0 !important;
-
-    pointer-events:
-        auto !important;
+[class*="st-key-note_wrap_"] [data-testid="stButton"] button {
+    width: 100% !important; height: 100% !important; min-height: 100% !important;
+    opacity: 0 !important; background: transparent !important; color: transparent !important;
+    border: 0 !important; box-shadow: none !important; cursor: pointer !important;
+    border-radius: 12px !important;
 }
+[class*="st-key-note_wrap_"] .note { pointer-events: none !important; }
 
-[class*="st-key-note_wrap_"]
-[data-testid="stButton"] button {
-
-    width:
-        100% !important;
-
-    height:
-        100% !important;
-
-    min-height:
-        100% !important;
-
-    border:
-        none !important;
-
-    border-radius:
-        8px 8px 18px 8px !important;
-
-    background:
-        transparent !important;
-
-    color:
-        transparent !important;
-
-    box-shadow:
-        none !important;
-
-    padding:
-        0 !important;
-
-    opacity:
-        1 !important;
-
-    cursor:
-        pointer !important;
+/* ---------- Confession Analyzer modal: same blurred backdrop as the AI chat ---------- */
+.st-key-note_overlay {
+    position: fixed !important; inset: 0 !important; z-index: 9998 !important;
+    background: rgba(20, 10, 30, .5) !important;
+    backdrop-filter: blur(6px) !important; -webkit-backdrop-filter: blur(6px) !important;
+    display: flex !important; align-items: center !important; justify-content: center !important;
+    padding: 20px !important; overflow-y: auto !important;
 }
-
-[class*="st-key-note_wrap_"]
-[data-testid="stButton"]
-button p {
-
-    color:
-        transparent !important;
-}
-
-
-/* ================================================================
-   NOTE ANALYZER
-   ================================================================ */
-
 .st-key-note_modal {
-
-    position:
-        relative !important;
-
-    z-index:
-        2 !important;
-
-    background:
-        #1c1626 !important;
-
-    border-radius:
-        22px !important;
-
-    width:
-        820px !important;
-
-    max-width:
-        94vw !important;
-
-    max-height:
-        88vh !important;
-
-    box-shadow:
-        0 25px 60px
-        rgba(0,0,0,.5) !important;
-
-    overflow:
-        hidden !important;
-
-    animation:
-        cwOpen .18s ease-out;
+    background: #1c1626 !important; border-radius: 20px !important;
+    width: 760px !important; max-width: 94vw !important; max-height: 88vh !important;
+    box-shadow: 0 25px 60px rgba(0,0,0,.5) !important;
+    overflow: hidden !important; animation: cwOpen .18s ease-out;
+    display: flex !important; flex-direction: column !important;
 }
-
-.st-key-note_close button,
-.st-key-chat_header button {
-
-    background:
-        rgba(255,255,255,.10) !important;
-
-    border:
-        none !important;
-
-    color:
-        #fff !important;
-
-    border-radius:
-        50% !important;
-
-    width:
-        32px !important;
-
-    height:
-        32px !important;
-
-    padding:
-        0 !important;
+.st-key-note_close button {
+    background: rgba(255,255,255,.1) !important; border: none !important;
+    color: #fff !important; border-radius: 50% !important;
+    width: 32px !important; height: 32px !important; padding: 0 !important;
 }
+.cw-note-grid { display: flex; gap: 0; overflow-y: auto; }
+@media (max-width: 720px) { .cw-note-grid { flex-direction: column; } }
+.cw-note-left { flex: 1; padding: 22px; display: flex; align-items: flex-start; justify-content: center; }
+.cw-note-right { flex: 1; padding: 22px; border-left: 1px solid rgba(255,255,255,.08); }
+@media (max-width: 720px) { .cw-note-right { border-left: none; border-top: 1px solid rgba(255,255,255,.08); } }
 
-.cw-note-grid {
+.cw-ai-badge { font-family: 'Quicksand', sans-serif; font-weight: 700; font-size: 13px;
+               color: #b79cff; letter-spacing: .5px; margin-bottom: 14px; }
+.cw-meaning-label, .cw-emotion-label { font-family: 'Quicksand', sans-serif; font-weight: 700;
+    font-size: 12px; letter-spacing: 1px; text-transform: uppercase; color: #9a8fb0; margin: 14px 0 6px; }
+.cw-meaning-text { font-family: 'Quicksand', sans-serif; font-size: 15px; line-height: 1.5; color: #f0eaf7; }
+.cw-emotion-badge { font-family: 'Quicksand', sans-serif; font-size: 16px; font-weight: 700; color: #f0eaf7; }
+.cw-emotion-secondary { font-family: 'Quicksand', sans-serif; font-size: 13px; color: #b0a4c4; margin-top: 4px; }
+.cw-intensity { font-family: 'Quicksand', sans-serif; font-size: 12px; color: #9a8fb0; margin-top: 8px; }
 
-    display:
-        flex;
-
-    gap:
-        0;
-
-    overflow-y:
-        auto;
+/* ---------- Custom nav bar (replaces st.tabs so the selected tab persists) ---------- */
+.cw-nav [data-testid="stRadio"] > div { gap: 22px; border-bottom: 1px solid rgba(255,255,255,.12); padding-bottom: 0; }
+.cw-nav [data-testid="stRadio"] label { padding: 6px 2px 10px !important; }
+.cw-nav [data-testid="stRadio"] label > div:first-child { display: none; }  /* hide the radio circle */
+.cw-nav [data-testid="stRadio"] label p {
+    font-family: 'Quicksand', sans-serif; font-weight: 700; font-size: 14px; color: #9a8fb0;
 }
-
-.cw-note-left {
-
-    flex:
-        1;
-
-    padding:
-        22px;
-
-    display:
-        flex;
-
-    align-items:
-        flex-start;
-
-    justify-content:
-        center;
-}
-
-.cw-note-right {
-
-    flex:
-        1;
-
-    padding:
-        24px;
-
-    border-left:
-        1px solid
-        rgba(255,255,255,.08);
-}
-
-@media (max-width: 720px) {
-
-    .cw-note-grid {
-        flex-direction:
-            column;
-    }
-
-    .cw-note-right {
-
-        border-left:
-            none;
-
-        border-top:
-            1px solid
-            rgba(255,255,255,.08);
-    }
-}
-
-.cw-ai-badge {
-
-    font-family:
-        'Quicksand',
-        sans-serif;
-
-    font-weight:
-        700;
-
-    font-size:
-        13px;
-
-    color:
-        #b79cff;
-
-    letter-spacing:
-        .5px;
-
-    margin-bottom:
-        14px;
-}
-
-.cw-meaning-label,
-.cw-emotion-label {
-
-    font-family:
-        'Quicksand',
-        sans-serif;
-
-    font-weight:
-        700;
-
-    font-size:
-        12px;
-
-    letter-spacing:
-        1px;
-
-    text-transform:
-        uppercase;
-
-    color:
-        #9a8fb0;
-
-    margin:
-        14px 0 6px;
-}
-
-.cw-meaning-text {
-
-    font-family:
-        'Quicksand',
-        sans-serif;
-
-    font-size:
-        15px;
-
-    line-height:
-        1.5;
-
-    color:
-        #f0eaf7;
-}
-
-.cw-emotion-card {
-
-    margin-top:
-        14px;
-
-    padding:
-        14px;
-
-    border-radius:
-        14px;
-
-    background:
-        rgba(255,255,255,.06);
-
-    border:
-        1px solid
-        rgba(255,255,255,.08);
-}
-
-.cw-emotion-badge {
-
-    font-family:
-        'Quicksand',
-        sans-serif;
-
-    font-size:
-        17px;
-
-    font-weight:
-        700;
-
-    color:
-        #f0eaf7;
-}
-
-.cw-emotion-secondary {
-
-    font-family:
-        'Quicksand',
-        sans-serif;
-
-    font-size:
-        13px;
-
-    color:
-        #b0a4c4;
-
-    margin-top:
-        5px;
-}
-
-.cw-intensity {
-
-    font-family:
-        'Quicksand',
-        sans-serif;
-
-    font-size:
-        12px;
-
-    color:
-        #9a8fb0;
-
-    margin-top:
-        8px;
-}
-
-
-/* ================================================================
-   NAVIGATION
-   ================================================================ */
-
-.cw-nav
-[data-testid="stRadio"] > div {
-
-    gap:
-        22px;
-
-    border-bottom:
-        1px solid
-        rgba(255,255,255,.12);
-
-    padding-bottom:
-        0;
-}
-
-.cw-nav
-[data-testid="stRadio"]
-label {
-
-    padding:
-        6px 2px 10px !important;
-}
-
-.cw-nav
-[data-testid="stRadio"]
-label > div:first-child {
-
-    display:
-        none;
-}
-
-.cw-nav
-[data-testid="stRadio"]
-label p {
-
-    font-family:
-        'Quicksand',
-        sans-serif;
-
-    font-weight:
-        700;
-
-    font-size:
-        14px;
-
-    color:
-        #9a8fb0;
-}
-
-.cw-nav
-[data-testid="stRadio"]
-label:has(input:checked) p {
-
-    color:
-        #ff9ebd;
-}
-
-.cw-nav
-[data-testid="stRadio"]
-label:has(input:checked) {
-
-    border-bottom:
-        2px solid
-        #ff9ebd;
-}
-
+.cw-nav [data-testid="stRadio"] label[data-checked="true"] p,
+.cw-nav [data-testid="stRadio"] label:has(input:checked) p { color: #ff9ebd; }
+.cw-nav [data-testid="stRadio"] label:has(input:checked) { border-bottom: 2px solid #ff9ebd; }
 </style>
-""",
-    unsafe_allow_html=True,
-)
+""", unsafe_allow_html=True)
 
 
-# ==========================================================================
-# FLOATING CHAT BUTTON JAVASCRIPT
-# ==========================================================================
-
+# --------------------------------------------------------------------------
+# Draggable floating chat head — real-time follows the cursor while held,
+# still a normal click when not dragged. Pure UI behavior; does not touch
+# any AI/analysis logic above.
+# --------------------------------------------------------------------------
 _CHAT_HEAD_JS = r"""
 (function () {
-
     var win = window.parent;
     var doc = win.document;
-
     var SIZE = 56;
 
-
     function findButtonByText(text) {
-
-        var buttons =
-            doc.querySelectorAll(
-                '[data-testid="stButton"] button'
-            );
-
-        for (
-            var i = 0;
-            i < buttons.length;
-            i++
-        ) {
-
-            if (
-                buttons[i]
-                .textContent
-                .trim()
-                === text
-            ) {
-
-                return buttons[i];
-            }
+        var btns = doc.querySelectorAll('[data-testid="stButton"] button');
+        for (var i = 0; i < btns.length; i++) {
+            if (btns[i].textContent.trim() === text) return btns[i];
         }
-
         return null;
     }
 
-
-    function place(
-        wrap,
-        left,
-        top
-    ) {
-
-        var maxLeft =
-            win.innerWidth
-            - SIZE
-            - 4;
-
-        var maxTop =
-            win.innerHeight
-            - SIZE
-            - 4;
-
-        wrap.style.left =
-            Math.max(
-                4,
-                Math.min(
-                    left,
-                    maxLeft
-                )
-            ) + "px";
-
-        wrap.style.top =
-            Math.max(
-                4,
-                Math.min(
-                    top,
-                    maxTop
-                )
-            ) + "px";
-
-        wrap.style.right =
-            "auto";
-
-        wrap.style.bottom =
-            "auto";
+    function place(wrap, left, top) {
+        var maxL = win.innerWidth - SIZE - 4;
+        var maxT = win.innerHeight - SIZE - 4;
+        wrap.style.left = Math.max(4, Math.min(left, maxL)) + 'px';
+        wrap.style.top = Math.max(4, Math.min(top, maxT)) + 'px';
+        wrap.style.right = 'auto';
+        wrap.style.bottom = 'auto';
     }
 
-
+    // Global listeners: bound only once, even though this script re-runs on every rerun
     function bindOnce() {
+        if (win.__cwHeadBound) return;
+        win.__cwHeadBound = true;
 
-        if (
-            win.__cwHeadBound
-        ) {
-            return;
-        }
-
-        win.__cwHeadBound =
-            true;
-
-
-        doc.addEventListener(
-            "pointermove",
-            function (event) {
-
-                var state =
-                    win.__cwHeadState;
-
-                if (
-                    !state
-                    || !state.down
-                ) {
-                    return;
-                }
-
-                var dx =
-                    event.clientX
-                    - state.x0;
-
-                var dy =
-                    event.clientY
-                    - state.y0;
-
-
-                if (
-                    !state.moved
-                    &&
-                    Math.abs(dx)
-                    +
-                    Math.abs(dy)
-                    > 4
-                ) {
-
-                    state.moved =
-                        true;
-                }
-
-
-                if (
-                    !state.moved
-                ) {
-                    return;
-                }
-
-
-                state.nextL =
-                    state.left0
-                    + dx;
-
-                state.nextT =
-                    state.top0
-                    + dy;
-
-
-                if (
-                    !state.raf
-                ) {
-
-                    state.raf =
-                        win.requestAnimationFrame(
-                            function () {
-
-                                state.raf =
-                                    null;
-
-                                place(
-                                    state.wrap,
-                                    state.nextL,
-                                    state.nextT
-                                );
-                            }
-                        );
-                }
+        doc.addEventListener('pointermove', function (e) {
+            var s = win.__cwHeadState;
+            if (!s || !s.down) return;
+            var dx = e.clientX - s.x0, dy = e.clientY - s.y0;
+            if (!s.moved && Math.abs(dx) + Math.abs(dy) > 4) s.moved = true;
+            if (!s.moved) return;
+            s.nextL = s.left0 + dx;
+            s.nextT = s.top0 + dy;
+            if (!s.raf) {
+                s.raf = win.requestAnimationFrame(function () {
+                    s.raf = null;
+                    place(s.wrap, s.nextL, s.nextT);
+                });
             }
-        );
+        });
 
-
-        doc.addEventListener(
-            "pointerup",
-            function () {
-
-                var state =
-                    win.__cwHeadState;
-
-                if (
-                    !state
-                    || !state.down
-                ) {
-                    return;
-                }
-
-
-                state.down =
-                    false;
-
-                clearTimeout(
-                    state.timer
-                );
-
-                state.wrap.style.transform =
-                    "";
-
-
-                if (
-                    state.moved
-                ) {
-
-                    state.swallow =
-                        true;
-
-                    setTimeout(
-                        function () {
-
-                            state.swallow =
-                                false;
-
-                        },
-                        400
-                    );
-
-
-                    var rect =
-                        state.wrap
-                        .getBoundingClientRect();
-
-
-                    try {
-
-                        win.sessionStorage.setItem(
-                            "cwHeadPos",
-                            JSON.stringify({
-                                left: rect.left,
-                                top: rect.top
-                            })
-                        );
-
-                    } catch (error) {}
-                }
+        doc.addEventListener('pointerup', function () {
+            var s = win.__cwHeadState;
+            if (!s || !s.down) return;
+            s.down = false;
+            clearTimeout(s.timer);
+            s.wrap.style.transform = '';
+            if (s.moved) {
+                s.swallow = true;  // don't let this drop count as a click
+                setTimeout(function () { s.swallow = false; }, 400);
+                var r = s.wrap.getBoundingClientRect();
+                try {
+                    win.sessionStorage.setItem('cwHeadPos', JSON.stringify({ left: r.left, top: r.top }));
+                } catch (err) {}
             }
-        );
+        });
 
-
-        doc.addEventListener(
-            "click",
-            function (event) {
-
-                var state =
-                    win.__cwHeadState;
-
-                if (
-                    state
-                    && state.swallow
-                ) {
-
-                    state.swallow =
-                        false;
-
-                    event.stopPropagation();
-
-                    event.preventDefault();
-                }
-            },
-            true
-        );
+        // Capture-phase click filter: swallows the click only right after a drag
+        doc.addEventListener('click', function (e) {
+            var s = win.__cwHeadState;
+            if (s && s.swallow) {
+                s.swallow = false;
+                e.stopPropagation();
+                e.preventDefault();
+            }
+        }, true);
     }
 
-
-    function onDown(event) {
-
-        if (
-            event.pointerType
-            === "mouse"
-            &&
-            event.button !== 0
-        ) {
-            return;
-        }
-
-
-        var wrap =
-            event.currentTarget;
-
-        var rect =
-            wrap.getBoundingClientRect();
-
-
-        var state = {
-
-            wrap: wrap,
-
-            down: true,
-
-            moved: false,
-
-            swallow: false,
-
-            x0:
-                event.clientX,
-
-            y0:
-                event.clientY,
-
-            left0:
-                rect.left,
-
-            top0:
-                rect.top,
-
-            timer: null,
-
-            raf: null
+    function onDown(e) {
+        if (e.pointerType === 'mouse' && e.button !== 0) return;
+        var wrap = e.currentTarget;
+        var r = wrap.getBoundingClientRect();
+        var s = {
+            wrap: wrap, down: true, moved: false, swallow: false,
+            x0: e.clientX, y0: e.clientY, left0: r.left, top0: r.top,
+            timer: null, raf: null
         };
-
-
-        state.timer =
-            setTimeout(
-                function () {
-
-                    wrap.style.transform =
-                        "scale(1.1)";
-
-                },
-                180
-            );
-
-
-        win.__cwHeadState =
-            state;
+        // Long press (~180ms) = "lift" visual, so the user knows it's grabbed
+        s.timer = setTimeout(function () {
+            wrap.style.transform = 'scale(1.1)';
+        }, 180);
+        win.__cwHeadState = s;
     }
-
 
     function styleFloatingHead() {
-
         bindOnce();
+        var btn = findButtonByText('\ud83d\udcac');  // 💬
+        if (!btn) return;
+        var wrap = btn.closest('[data-testid="stButton"]');
+        if (!wrap || wrap.dataset.cwStyled) return;
+        wrap.dataset.cwStyled = '1';
 
+        wrap.style.position = 'fixed';
+        wrap.style.zIndex = '999997';
+        wrap.style.touchAction = 'none';
+        wrap.style.transition = 'transform .15s ease';
 
-        var button =
-            findButtonByText(
-                "💬"
-            );
+        btn.style.background = 'linear-gradient(135deg, #7c3aed, #9333ea)';
+        btn.style.color = '#fff';
+        btn.style.border = 'none';
+        btn.style.borderRadius = '50%';
+        btn.style.width = SIZE + 'px';
+        btn.style.height = SIZE + 'px';
+        btn.style.padding = '0';
+        btn.style.fontSize = '24px';
+        btn.style.boxShadow = '0 6px 18px rgba(124,58,237,.5)';
+        btn.style.cursor = 'grab';
+        btn.style.touchAction = 'none';
 
-
-        if (!button) {
-            return;
-        }
-
-
-        var wrap =
-            button.closest(
-                '[data-testid="stButton"]'
-            );
-
-
-        if (
-            !wrap
-            || wrap.dataset.cwStyled
-        ) {
-            return;
-        }
-
-
-        wrap.dataset.cwStyled =
-            "1";
-
-
-        wrap.style.position =
-            "fixed";
-
-        wrap.style.zIndex =
-            "999997";
-
-        wrap.style.touchAction =
-            "none";
-
-        wrap.style.transition =
-            "transform .15s ease";
-
-
-        button.style.background =
-            "linear-gradient(135deg,#7c3aed,#9333ea)";
-
-        button.style.color =
-            "#fff";
-
-        button.style.border =
-            "none";
-
-        button.style.borderRadius =
-            "50%";
-
-        button.style.width =
-            SIZE + "px";
-
-        button.style.height =
-            SIZE + "px";
-
-        button.style.padding =
-            "0";
-
-        button.style.fontSize =
-            "24px";
-
-        button.style.boxShadow =
-            "0 6px 18px rgba(124,58,237,.5)";
-
-        button.style.cursor =
-            "grab";
-
-        button.style.touchAction =
-            "none";
-
-
+        // Restore last position (survives reruns and open/close)
         var saved = null;
-
-
-        try {
-
-            saved =
-                JSON.parse(
-                    win.sessionStorage.getItem(
-                        "cwHeadPos"
-                    )
-                );
-
-        } catch (error) {}
-
-
-        if (
-            saved
-            &&
-            typeof saved.left
-            === "number"
-        ) {
-
-            place(
-                wrap,
-                saved.left,
-                saved.top
-            );
-
+        try { saved = JSON.parse(win.sessionStorage.getItem('cwHeadPos')); } catch (e) {}
+        if (saved && typeof saved.left === 'number') {
+            place(wrap, saved.left, saved.top);
         } else {
-
-            place(
-                wrap,
-                win.innerWidth
-                - SIZE
-                - 24,
-
-                win.innerHeight
-                - SIZE
-                - 24
-            );
+            place(wrap, win.innerWidth - SIZE - 24, win.innerHeight - SIZE - 24);
         }
 
-
-        wrap.addEventListener(
-            "pointerdown",
-            onDown
-        );
+        wrap.addEventListener('pointerdown', onDown);
     }
 
-
     styleFloatingHead();
-
-    setTimeout(
-        styleFloatingHead,
-        200
-    );
-
-    setTimeout(
-        styleFloatingHead,
-        600
-    );
-
+    setTimeout(styleFloatingHead, 200);
+    setTimeout(styleFloatingHead, 600);
 })();
 """
 
 
-# ==========================================================================
-# HTML HELPERS
-# ==========================================================================
+# Outside-click dismissal for both modal overlays.
+_MODAL_DISMISS_JS = r"""
+(function () {
+    var win = window.parent;
+    var doc = win.document;
+    if (win.__cwModalDismissBound) return;
+    win.__cwModalDismissBound = true;
 
-def _clean(value) -> str:
-    """
-    Convert values into safe HTML text.
-    """
+    doc.addEventListener('pointerdown', function (e) {
+        function closeIfOutside(overlaySelector, modalSelector, closeSelector) {
+            var overlay = doc.querySelector(overlaySelector);
+            var modal = doc.querySelector(modalSelector);
+            if (!overlay || !modal) return;
+            if (modal.contains(e.target)) return;
+            if (!overlay.contains(e.target)) return;
+            var close = doc.querySelector(closeSelector);
+            if (close) close.click();
+        }
 
-    if value is None:
+        closeIfOutside('.st-key-chat_overlay', '.st-key-chat_modal', '.st-key-chat_close button');
+        closeIfOutside('.st-key-note_overlay', '.st-key-note_modal', '.st-key-note_close button');
+    }, true);
+})();
+"""
+
+
+def _clean(v) -> str:
+    """NaN-safe, HTML-safe text."""
+    if v is None or (not isinstance(v, str) and pd.isna(v)):
         return ""
+    return html.escape(str(v))
 
-    try:
-
-        if pd.isna(value):
-            return ""
-
-    except Exception:
-        pass
-
-    return html.escape(
-        str(value)
-    )
-
-
-# ==========================================================================
-# NOTE HTML
-# ==========================================================================
 
 def _note_html(row) -> str:
-    """
-    Generate HTML for a paper note.
-    """
-
-    color = str(
-        row.get(
-            "note_color",
-            ""
-        )
-    )
-
+    """Build the HTML of one paper note (color chosen by the sender)."""
+    color = row.get("note_color", "")
     try:
-
-        note_id = int(
-            float(
-                row.get(
-                    "id",
-                    0
-                )
-            )
-        )
-
+        rid = int(row.get("id", 0))
     except Exception:
-
-        note_id = 0
-
-
-    if color not in NOTE_COLORS:
-
-        color = (
-            FALLBACK_COLORS[
-                note_id
-                % len(FALLBACK_COLORS)
-            ]
-        )
-
-
-    (
-        _,
-        paper,
-        tape,
-        ink,
-        sub,
-    ) = NOTE_COLORS[color]
-
-
+        rid = 0
+    if color not in NOTE_COLORS:  # older rows: stable color from their id
+        color = FALLBACK_COLORS[rid % len(FALLBACK_COLORS)]
+    _, paper, tape, ink, sub = NOTE_COLORS[color]
     tilt = TILTS[rid % len(TILTS)]
-        TILTS[
-            note_id
-            % len(TILTS)
-        ]
-
-
     try:
-
-        date = (
-            pd.to_datetime(
-                row.get(
-                    "timestamp"
-                )
-            )
-            .strftime(
-                "%B %d, %Y"
-            )
-        )
-
+        date = pd.to_datetime(row.get("timestamp")).strftime("%B %d, %Y")
     except Exception:
-
         date = ""
-
-
-    message = (
-        _clean(
-            row.get(
-                "message",
-                ""
-            )
-        )
-        .replace(
-            "\n",
-            "<br>"
-        )
-    )
-
-
-    target = _clean(
-        row.get(
-            "target_name",
-            ""
-        )
-    )
-
-
-    sender = _clean(
-        row.get(
-            "sender_name",
-            "Anonymous"
-        )
-    )
-
-
-    tag = _clean(
-        row.get(
-            "emoji_tag",
-            ""
-        )
-    )
-
-
-    tag_html = ""
-
-    if tag:
-
-        tag_html = (
-            f'<span class="note-tag">'
-            f'{tag}'
-            f'</span>'
-        )
-
-
+    msg = _clean(row["message"]).replace("\n", "<br>")
+    tag = _clean(row.get("emoji_tag", ""))
+    tag_html = f'<span class="note-tag">{tag}</span>' if tag else ""
     return (
-        f'<div class="note" '
-        f'style="'
-        f'background-color:{paper};'
-        f'--tape:{tape};'
-        f'--ink:{ink};'
-        f'--sub:{sub};'
-        f'--tilt:{tilt}deg;'
-        f'">'
-
-        f'<div class="note-to">'
-        f'To: {target}'
-        f'</div>'
-
-        f'<div class="note-msg">'
-        f'{message}'
-        f'</div>'
-
-        f'<div class="note-from">'
-        f'— {sender}'
-        f'</div>'
-
-        f'<div class="note-date">'
-        f'{date}'
-        f'</div>'
-
+        f'<div class="note" style="background-color:{paper};--tape:{tape};--ink:{ink};--sub:{sub};--tilt:{tilt}deg;">'
+        f'<div class="note-to">To: {_clean(row["target_name"])}</div>'
+        f'<div class="note-msg">{msg}</div>'
+        f'<div class="note-from">— {_clean(row["sender_name"])}</div>'
+        f'<div class="note-date">{date}</div>'
         f'{tag_html}'
-
         f'</div>'
     )
 
 
-# ==========================================================================
-# PREVIEW CARD
-# ==========================================================================
-
-def render_card(
-    row,
-):
-
-    st.markdown(
-        f'<div class="single">'
-        f'{_note_html(row)}'
-        f'</div>',
-        unsafe_allow_html=True,
-    )
+def render_card(row):
+    """Show a single note (used for the preview after posting)."""
+    st.markdown(f'<div class="single">{_note_html(row)}</div>', unsafe_allow_html=True)
 
 
-# ==========================================================================
-# NOTE MODAL
-# ==========================================================================
+def render_wall(df: pd.DataFrame):
+    """Show many notes as a responsive paper wall."""
+    notes = "".join(_note_html(r) for _, r in df.iterrows())
+    st.markdown(f'<div class="wall">{notes}</div>', unsafe_allow_html=True)
+
 
 def render_note_modal():
-
+    """Confession Analyzer: focused modal for one note — original note on the
+    left, AI 'meaning' + 'emotion review' on the right (stacks on mobile)."""
     df = load_data()
-
-    numeric_ids = pd.to_numeric(
-        df["id"],
-        errors="coerce",
-    )
-
-    match = df[
-        numeric_ids
-        == st.session_state.selected_note_id
-    ]
-
+    match = df[df["id"] == st.session_state.selected_note_id]
     if match.empty:
-
         st.session_state.note_modal_open = False
-
         return
-
-
     row = match.iloc[0]
 
-
-    with st.container(
-        key="note_overlay"
-    ):
-
-        # ----------------------------------------------------------
-        # BACKDROP CLOSE
-        # ----------------------------------------------------------
-
-        with st.container(
-            key="note_backdrop_close"
-        ):
-
-            if st.button(
-                "close backdrop",
-                key="note_backdrop_btn",
-            ):
-
-                st.session_state.note_modal_open = False
-
-                st.session_state.selected_note_id = None
-
-                st.rerun()
-
-
-        # ----------------------------------------------------------
-        # MODAL
-        # ----------------------------------------------------------
-
-        with st.container(
-            key="note_modal"
-        ):
-
-            top1, top2 = st.columns(
-                [8, 1]
-            )
-
+    with st.container(key="note_overlay"):
+        with st.container(key="note_modal"):
+            top1, top2 = st.columns([8, 1])
             with top1:
-
                 st.markdown(
-                    """
-                    <div style="
-                        padding:14px 18px 0;
-                        font-family:Quicksand,sans-serif;
-                        font-weight:700;
-                        color:#b79cff;
-                        font-size:14px;
-                    ">
-                    🔍 Note Meaning
-                    </div>
-                    """,
+                    '<div style="padding:14px 18px 0; font-family:Quicksand,sans-serif; '
+                    'font-weight:700; color:#b79cff; font-size:14px;">🔍 Confession Analyzer</div>',
                     unsafe_allow_html=True,
                 )
-
             with top2:
-
-                with st.container(
-                    key="note_close"
-                ):
-
-                    if st.button(
-                        "✕",
-                        key="note_close_btn",
-                    ):
-
+                with st.container(key="note_close"):
+                    if st.button("✕", key="note_close_btn"):
                         st.session_state.note_modal_open = False
-
-                        st.session_state.selected_note_id = None
-
                         st.rerun()
 
+            st.markdown('<div class="cw-note-grid">', unsafe_allow_html=True)
 
-            left, right = st.columns(
-                2
-            )
-
-
-            # ------------------------------------------------------
-            # ORIGINAL NOTE
-            # ------------------------------------------------------
-
+            left, right = st.columns(2)
             with left:
-
-                st.markdown(
-                    f"""
-                    <div class="cw-note-left">
-                        {_note_html(row)}
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
-
-
-            # ------------------------------------------------------
-            # AI ANALYSIS
-            # ------------------------------------------------------
+                st.markdown(f'<div class="cw-note-left">{_note_html(row)}</div>', unsafe_allow_html=True)
 
             with right:
-
-                already_analyzed = (
-                    str(
-                        row.get(
-                            "emotion",
-                            ""
-                        )
-                    ).strip()
-                    != ""
-                )
-
-
+                already_analyzed = str(row.get("emotion", "")).strip() != ""
                 if already_analyzed:
-
-                    result = (
-                        get_or_analyze_emotion(
-                            row
-                        )
-                    )
-
+                    result = get_or_analyze_emotion(row)
                 else:
+                    with st.spinner("✨ AI is reading this confession..."):
+                        result = get_or_analyze_emotion(row)
 
-                    with st.spinner(
-                        "✨ AI is reading this note..."
-                    ):
-
-                        result = (
-                            get_or_analyze_emotion(
-                                row
-                            )
-                        )
-
-
-                color_name = str(
-                    row.get(
-                        "note_color",
-                        ""
-                    )
-                )
-
-
+                # subtle accent from the note's own color
+                color_name = row.get("note_color", "")
                 if color_name not in NOTE_COLORS:
+                    color_name = FALLBACK_COLORS[int(row["id"]) % len(FALLBACK_COLORS)]
+                accent = NOTE_COLORS[color_name][2]
 
-                    try:
+                emo = result.get("emotion", "Neutral")
+                sec = result.get("secondary_emotion", "")
+                emo_icon = EMOTION_CATEGORIES.get(emo, "😐")
+                sec_icon = EMOTION_CATEGORIES.get(sec, "")
 
-                        note_id = int(
-                            float(
-                                row["id"]
-                            )
-                        )
+                right_html = f'<div class="cw-note-right" style="border-top:3px solid {accent};">'
+                right_html += '<div class="cw-ai-badge">✨ AI Interpretation</div>'
+                right_html += '<div class="cw-meaning-label">The Meaning</div>'
+                right_html += f'<div class="cw-meaning-text">{_clean(result.get("meaning",""))}</div>'
+                right_html += '<div class="cw-emotion-label">Emotion Review</div>'
+                right_html += f'<div class="cw-emotion-badge">{emo_icon} {_clean(emo)}</div>'
+                if sec:
+                    right_html += f'<div class="cw-emotion-secondary">Secondary: {sec_icon} {_clean(sec)}</div>'
+                right_html += f'<div class="cw-intensity">Intensity: {_clean(result.get("intensity","Mild"))}</div>'
+                right_html += '</div>'
+                st.markdown(right_html, unsafe_allow_html=True)
 
-                    except Exception:
-
-                        note_id = 0
-
-
-                    color_name = (
-                        FALLBACK_COLORS[
-                            note_id
-                            % len(
-                                FALLBACK_COLORS
-                            )
-                        ]
-                    )
-
-
-                accent = (
-                    NOTE_COLORS[
-                        color_name
-                    ][2]
-                )
+            st.markdown('</div>', unsafe_allow_html=True)
 
 
-                emotion = result.get(
-                    "emotion",
-                    "Neutral"
-                )
+def _guess_note_accent(answer: str, df: pd.DataFrame, question: str = ""):
+    """Pick an accent from the most relevant note mentioned by the answer/question."""
+    q = _normalize_text(question)
+    a = _normalize_text(answer)
 
-                secondary = result.get(
-                    "secondary_emotion",
-                    ""
-                )
-
-                emotion_icon = (
-                    EMOTION_CATEGORIES.get(
-                        emotion,
-                        "😐"
-                    )
-                )
-
-                secondary_icon = (
-                    EMOTION_CATEGORIES.get(
-                        secondary,
-                        ""
-                    )
-                )
-
-
-                secondary_html = ""
-
-                if secondary:
-
-                    secondary_html = (
-                        f'<div '
-                        f'class="cw-emotion-secondary">'
-                        f'Secondary: '
-                        f'{secondary_icon} '
-                        f'{_clean(secondary)}'
-                        f'</div>'
-                    )
-
-
-                st.markdown(
-                    f"""
-                    <div
-                        class="cw-note-right"
-                        style="
-                            border-top:
-                            3px solid {accent};
-                        "
-                    >
-
-                        <div class="cw-ai-badge">
-                            ✨ AI Interpretation
-                        </div>
-
-                        <div class="cw-meaning-label">
-                            The Meaning
-                        </div>
-
-                        <div class="cw-meaning-text">
-                            {_clean(
-                                result.get(
-                                    "meaning",
-                                    ""
-                                )
-                            )}
-                        </div>
-
-                        <div class="cw-emotion-label">
-                            Emotion Review
-                        </div>
-
-                        <div class="cw-emotion-card">
-
-                            <div class="cw-emotion-badge">
-                                {emotion_icon}
-                                {_clean(emotion)}
-                            </div>
-
-                            {secondary_html}
-
-                            <div class="cw-intensity">
-                                Intensity:
-                                {_clean(
-                                    result.get(
-                                        "intensity",
-                                        "Mild"
-                                    )
-                                )}
-                            </div>
-
-                        </div>
-
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
-
-
-# ==========================================================================
-# CHAT BUBBLE ACCENT
-# ==========================================================================
-
-def _guess_note_accent(
-    answer: str,
-    df: pd.DataFrame,
-):
-
-    lower_answer = (
-        answer.lower()
-    )
-
-
+    # Prefer an exact named author/recipient appearing in the question.
+    candidates = []
     for _, row in df.iterrows():
+        sender = _normalize_text(row.get("sender_name", ""))
+        target = _normalize_text(row.get("target_name", ""))
+        if sender and sender != "anonymous" and len(sender) >= 3 and sender in q:
+            candidates.append(row)
+        elif target and len(target) >= 3 and target in q:
+            candidates.append(row)
 
-        sender = str(
-            row.get(
-                "sender_name",
-                ""
-            )
-        ).strip()
+    # Otherwise use names explicitly mentioned by the AI reply.
+    if not candidates:
+        for _, row in df.sort_values("id", ascending=False).iterrows():
+            sender = _normalize_text(row.get("sender_name", ""))
+            target = _normalize_text(row.get("target_name", ""))
+            if (sender and sender != "anonymous" and len(sender) >= 3 and sender in a) or (target and len(target) >= 3 and target in a):
+                candidates.append(row)
+                break
 
-
-        if (
-            not sender
-            or sender.lower()
-            == "anonymous"
-        ):
-
-            continue
-
-
-        if (
-            sender.lower()
-            in lower_answer
-        ):
-
-            color = row.get(
-                "note_color",
-                ""
-            )
-
-
-            if color in NOTE_COLORS:
-
-                return (
-                    NOTE_COLORS[
-                        color
-                    ][2]
-                )
-
-
+    if candidates:
+        color = candidates[0].get("note_color", "")
+        if color in NOTE_COLORS:
+            return NOTE_COLORS[color][2]
     return None
 
 
-# ==========================================================================
-# APP TITLE
-# ==========================================================================
+# --------------------------------------------------------------------------
+# APP LAYOUT
+# --------------------------------------------------------------------------
+st.title("🎓 Confession Wall")
+st.caption("Say what's on your mind about teachers, rooms, staff, or fellow students.")
 
-st.title(
-    "🎓 Confession Wall"
-)
-
-st.caption(
-    "A place to share thoughts, messages, "
-    "and moments with the people around you."
-)
-
-
-# ==========================================================================
-# SESSION STATE
-# ==========================================================================
-
+# ---- Floating purple AI chat: MODAL + full-screen blurred backdrop ----
 if "chat_open" not in st.session_state:
-
     st.session_state.chat_open = False
-
-
 if "chat_history" not in st.session_state:
-
     st.session_state.chat_history = []
-
-
 if "chat_pending" not in st.session_state:
-
     st.session_state.chat_pending = None
-
-
 if "note_modal_open" not in st.session_state:
-
     st.session_state.note_modal_open = False
-
-
 if "selected_note_id" not in st.session_state:
-
     st.session_state.selected_note_id = None
 
+# Bind modal outside-click behavior once.
+components.html(f"<script>{_MODAL_DISMISS_JS}</script>", height=0)
 
-if "active_tab" not in st.session_state:
-
-    st.session_state.active_tab = (
-        "✏️ Leave a Message"
-    )
-
-
-# ==========================================================================
-# CHAT / NOTE MODAL
-# ==========================================================================
-
+# Only one overlay active at a time: opening the Confession Analyzer closes the chat.
 if st.session_state.note_modal_open:
-
     st.session_state.chat_open = False
-
     render_note_modal()
-
-
 elif not st.session_state.chat_open:
-
-    # --------------------------------------------------------------
-    # CLOSED CHAT BUTTON
-    # --------------------------------------------------------------
-
-    with st.container(
-        key="chat_toggle_btn"
-    ):
-
-        if st.button(
-            "💬",
-            key="chat_toggle"
-        ):
-
+    # CLOSED: only the small floating purple icon is visible.
+    with st.container(key="chat_toggle_btn"):
+        if st.button("💬", key="chat_toggle"):
             st.session_state.chat_open = True
-
             st.rerun()
-
-
-    components.html(
-        f"""
-        <script>
-        {_CHAT_HEAD_JS}
-        </script>
-        """,
-        height=0,
-    )
-
-
+    # Make that button draggable (long-press + drag = move; plain click = open).
+    components.html(f"<script>{_CHAT_HEAD_JS}</script>", height=0)
 else:
-
-    # --------------------------------------------------------------
-    # OPEN CHAT
-    # --------------------------------------------------------------
-
-    with st.container(
-        key="chat_overlay"
-    ):
-
-        # ----------------------------------------------------------
-        # OUTSIDE CLICK
-        # ----------------------------------------------------------
-
-        with st.container(
-            key="chat_backdrop_close"
-        ):
-
-            if st.button(
-                "close backdrop",
-                key="chat_backdrop_btn",
-            ):
-
-                st.session_state.chat_open = False
-
-                st.rerun()
-
-
-        # ----------------------------------------------------------
-        # CHAT MODAL
-        # ----------------------------------------------------------
-
-        with st.container(
-            key="chat_modal"
-        ):
-
-            # ------------------------------------------------------
-            # HEADER
-            # ------------------------------------------------------
-
-            with st.container(
-                key="chat_header"
-            ):
-
-                hcol1, hcol2 = st.columns(
-                    [6, 1]
-                )
-
-
+    # OPEN: full-screen blurred/dimmed backdrop with a sharp floating card on top.
+    with st.container(key="chat_overlay"):
+        with st.container(key="chat_modal"):
+            with st.container(key="chat_header"):
+                hcol1, hcol2, hcol3 = st.columns([5.5, 1.2, 1])
                 with hcol1:
-
                     st.markdown(
-                        """
-                        <div class="cw-header-title">
-                            AI Assistant
-                        </div>
-
-                        <div class="cw-header-sub">
-                            Ask anything about the
-                            messages posted on the wall.
-                        </div>
-                        """,
+                        '<div class="cw-header-title">AI Assistant</div>'
+                        '<div class="cw-header-sub">Ask anything about the confessions posted on the wall.</div>',
                         unsafe_allow_html=True,
                     )
-
-
                 with hcol2:
-
-                    if st.button(
-                        "✕",
-                        key="chat_close",
-                    ):
-
+                    if st.button("＋ New", key="chat_new_topic"):
+                        st.session_state.chat_history = []
+                        st.session_state.chat_pending = None
+                        st.rerun()
+                with hcol3:
+                    if st.button("✕", key="chat_close"):
                         st.session_state.chat_open = False
-
                         st.rerun()
 
-
-            # ------------------------------------------------------
-            # CHAT BODY
-            # ------------------------------------------------------
-
-            body_html = (
-                '<div class="cw-body" '
-                'id="cw-body">'
-            )
-
-
+            # message area (clean initial state — no pre-filled/leftover content)
+            body_html = '<div class="cw-body" id="cw-body">'
             if not st.session_state.chat_history:
-
-                body_html += """
-                <div class="cw-row ai">
-
-                    <div>
-
-                        <div class="cw-label">
-                            AI
-                        </div>
-
-                        <div class="cw-bubble ai">
-                            Ask me anything about
-                            the messages posted
-                            on the wall!
-                        </div>
-
-                    </div>
-
-                </div>
-                """
-
-
-            for turn in (
-                st.session_state.chat_history
-            ):
-
-                is_ai = (
-                    turn["role"]
-                    != "user"
-                )
-
-                side = (
-                    "ai"
-                    if is_ai
-                    else "user"
-                )
-
-                label = (
-                    "AI"
-                    if is_ai
-                    else "You"
-                )
-
-                accent = (
-                    turn.get("accent")
-                    if is_ai
-                    else None
-                )
-
-
-                if accent:
-
-                    style_attr = (
-                        f' style="'
-                        f'background:{accent};'
-                        f'color:#1a1a1a;'
-                        f'"'
-                    )
-
-                else:
-
-                    style_attr = ""
-
-
-                safe_content = html.escape(
-                    str(
-                        turn["content"]
-                    )
-                )
-
-
                 body_html += (
-                    f'<div '
-                    f'class="cw-row {side}">'
-                    f'<div>'
-                    f'<div class="cw-label">'
-                    f'{label}'
-                    f'</div>'
-                    f'<div '
-                    f'class="cw-bubble {side}"'
-                    f'{style_attr}>'
-                    f'{safe_content}'
-                    f'</div>'
-                    f'</div>'
-                    f'</div>'
+                    '<div class="cw-row ai"><div>'
+                    '<div class="cw-label">AI</div>'
+                    '<div class="cw-bubble ai">Ask me anything about the confessions posted on the wall!</div>'
+                    '</div></div>'
                 )
-
-
-            # ------------------------------------------------------
-            # TYPING
-            # ------------------------------------------------------
-
-            if (
-                st.session_state.chat_pending
-            ):
-
-                body_html += """
-                <div class="cw-row ai">
-
-                    <div>
-
-                        <div class="cw-label">
-                            AI
-                        </div>
-
-                        <div class="cw-typing">
-                            <span></span>
-                            <span></span>
-                            <span></span>
-                        </div>
-
-                    </div>
-
-                </div>
-                """
-
-
+            for turn in st.session_state.chat_history:
+                is_ai = turn["role"] != "user"
+                side = "ai" if is_ai else "user"
+                label = "AI" if is_ai else "You"
+                accent = turn.get("accent") if is_ai else None
+                style_attr = f' style="background:{accent};color:#1a1a1a;"' if accent else ""
+                body_html += (
+                    f'<div class="cw-row {side}"><div>'
+                    f'<div class="cw-label">{label}</div>'
+                    f'<div class="cw-bubble {side}"{style_attr}>{html.escape(turn["content"])}</div>'
+                    f'</div></div>'
+                )
+            if st.session_state.chat_pending:
+                body_html += (
+                    '<div class="cw-row ai"><div>'
+                    '<div class="cw-label">AI</div>'
+                    '<div class="cw-typing"><span></span><span></span><span></span></div>'
+                    '</div></div>'
+                )
             body_html += "</div>"
+            st.markdown(body_html, unsafe_allow_html=True)
 
-
-            st.markdown(
-                body_html,
-                unsafe_allow_html=True,
-            )
-
-
-            # ------------------------------------------------------
-            # AUTO SCROLL
-            # ------------------------------------------------------
-
+            # auto-follow the latest message — no manual scrolling needed
             components.html(
                 """
                 <script>
-
-                var body =
-                    window.parent.document
-                    .getElementById(
-                        'cw-body'
-                    );
-
-                if (body) {
-
-                    body.scrollTop =
-                        body.scrollHeight;
-                }
-
+                  var d = window.parent.document.getElementById('cw-body');
+                  if (d) { d.scrollTop = d.scrollHeight; }
                 </script>
                 """,
                 height=0,
             )
 
+            if st.session_state.chat_history:
+                clear_col1, clear_col2 = st.columns([7, 1])
+                with clear_col2:
+                    if st.button("🗑", key="chat_clear_history", help="Delete this conversation"):
+                        st.session_state.chat_history = []
+                        st.session_state.chat_pending = None
+                        st.rerun()
 
-            # ------------------------------------------------------
-            # PROCESS QUESTION
-            # ------------------------------------------------------
-
-            if (
-                st.session_state.chat_pending
-            ):
-
-                question = (
-                    st.session_state.chat_pending
-                )
-
-                full_df = load_data()
-
-
-                answer = chatbot_answer(
-                    question,
-                    full_df,
-                    st.session_state.chat_history,
-                )
-
-
-                accent = (
-                    _guess_note_accent(
-                        answer,
-                        full_df,
-                    )
-                )
-
-
+            # if a question was just sent, generate the reply now (the dots
+            # above show for this render), then rerun with the real answer.
+            # NOTE: we pass the FULL wall (load_data()), not a sentiment-filtered
+            # subset — otherwise the AI only "sees" messages that already went
+            # through GenAI analysis and misses everything else on the wall.
+            if st.session_state.chat_pending:
+                question = st.session_state.chat_pending
+                _full_df = load_data()
+                answer = chatbot_answer(question, _full_df, st.session_state.chat_history)
+                accent = _guess_note_accent(answer, _full_df, question)
                 st.session_state.chat_history.append(
-                    {
-                        "role": "assistant",
-                        "content": answer,
-                        "accent": accent,
-                    }
+                    {"role": "assistant", "content": answer, "accent": accent}
                 )
-
-
                 st.session_state.chat_pending = None
-
                 st.rerun()
 
-
-            # ------------------------------------------------------
-            # CHAT INPUT
-            # ------------------------------------------------------
-
-            with st.container(
-                key="chat_inputbar"
-            ):
-
-                with st.form(
-                    "chat_form",
-                    clear_on_submit=True,
-                ):
-
-                    colA, colB = st.columns(
-                        [5, 1]
-                    )
-
-
+            with st.container(key="chat_inputbar"):
+                with st.form("chat_form", clear_on_submit=True):
+                    colA, colB = st.columns([5, 1])
                     with colA:
-
                         user_q = st.text_input(
-                            "msg",
-                            placeholder=(
-                                "Type a message..."
-                            ),
-                            label_visibility=(
-                                "collapsed"
-                            ),
+                            "msg", placeholder="Type a message...", label_visibility="collapsed"
                         )
-
-
                     with colB:
-
-                        send = (
-                            st.form_submit_button(
-                                "➤"
-                            )
-                        )
-
-
-                if (
-                    send
-                    and user_q.strip()
-                ):
-
-                    st.session_state.chat_history.append(
-                        {
-                            "role": "user",
-                            "content": user_q.strip(),
-                        }
-                    )
-
-                    st.session_state.chat_pending = (
-                        user_q.strip()
-                    )
-
+                        send = st.form_submit_button("➤")
+                if send and user_q.strip():
+                    st.session_state.chat_history.append({"role": "user", "content": user_q})
+                    st.session_state.chat_pending = user_q
                     st.rerun()
 
+# Custom nav (instead of st.tabs) so the current tab survives reruns —
+# e.g. closing the Confession Analyzer modal keeps you on Browse Wall
+# instead of snapping back to the first tab.
+TAB_OPTIONS = ["✏️ Leave a Message", "📝 Browse Wall", "📊 Insights"]
+if "active_tab" not in st.session_state:
+    st.session_state.active_tab = TAB_OPTIONS[0]
 
-# ==========================================================================
-# NAVIGATION
-# ==========================================================================
-
-TAB_OPTIONS = [
-    "✏️ Leave a Message",
-    "📝 Browse Wall",
-    "📊 Insights",
-]
-
-
-st.markdown(
-    '<div class="cw-nav">',
-    unsafe_allow_html=True,
-)
-
-
+st.markdown('<div class="cw-nav">', unsafe_allow_html=True)
 st.session_state.active_tab = st.radio(
-    "nav",
-    TAB_OPTIONS,
-    index=TAB_OPTIONS.index(
-        st.session_state.active_tab
-    ),
-    horizontal=True,
-    label_visibility="collapsed",
-    key="nav_radio",
+    "nav", TAB_OPTIONS,
+    index=TAB_OPTIONS.index(st.session_state.active_tab),
+    horizontal=True, label_visibility="collapsed", key="nav_radio",
 )
+st.markdown('</div>', unsafe_allow_html=True)
 
-
-st.markdown(
-    '</div>',
-    unsafe_allow_html=True,
-)
-
-
-# ==========================================================================
-# TAB 1 — LEAVE A MESSAGE
-# ==========================================================================
-
-if (
-    st.session_state.active_tab
-    == TAB_OPTIONS[0]
-):
-
-    st.subheader(
-        "Write your message"
-    )
-
-
-    with st.form(
-        "new_message_form",
-        clear_on_submit=True,
-    ):
-
+# ---- TAB 1: Submit a message ----
+if st.session_state.active_tab == TAB_OPTIONS[0]:
+    st.subheader("Write your message")
+    with st.form("new_message_form", clear_on_submit=True):
         target_name = st.text_input(
             "Recipient",
-            placeholder=(
-                "🔍 Search recipient..."
-                " (e.g. Sir John, Room 204, Canteen staff)"
-            ),
+            placeholder="🔍 Search recipient... (e.g. Sir John, Room 204, Canteen staff)",
         )
-
-
-        message = st.text_area(
-            "Message",
-            height=150,
-            placeholder=(
-                "Write what's on your mind..."
-            ),
-        )
-
-
-        sender_name = st.text_input(
-            "From (optional — leave blank to stay Anonymous)"
-        )
-
-
-        with st.expander(
-            "🎨 Add Color"
-        ):
-
+        message = st.text_area("Message", height=150, placeholder="Write what's on your mind...")
+        sender_name = st.text_input("From (optional — leave blank to stay Anonymous)")
+        with st.expander("🎨 Add Color"):
             note_color = st.radio(
                 "Choose your note color",
                 COLOR_NAMES,
-                format_func=lambda name:
-                    f"{NOTE_COLORS[name][0]} {name}",
+                format_func=lambda n: f"{NOTE_COLORS[n][0]} {n}",
                 horizontal=True,
                 label_visibility="collapsed",
             )
-
-
-        submitted = st.form_submit_button(
-            "Post to the Wall"
-        )
-
+        submitted = st.form_submit_button("Post to the Wall")
 
     if submitted:
-
         if not target_name.strip():
-
-            st.warning(
-                "Please type who or what "
-                "this message is for."
-            )
-
+            st.warning("Please type who or what this message is for.")
         elif not message.strip():
-
-            st.warning(
-                "Please write your message."
-            )
-
+            st.warning("Please write your message.")
         else:
-
-            with st.spinner(
-                "Analyzing your message..."
-            ):
-
-                analysis = analyze_message(
-                    message.strip(),
-                    "Recipient",
-                    target_name.strip(),
-                )
-
-
+            with st.spinner("Analyzing your message..."):
+                analysis = analyze_message(message, "Recipient", target_name.strip())
             new_row = {
-
-                "timestamp":
-                    datetime.now().strftime(
-                        "%Y-%m-%d %H:%M"
-                    ),
-
-                "target_type":
-                    "Recipient",
-
-                "target_name":
-                    target_name.strip(),
-
-                "message":
-                    message.strip(),
-
-                "sender_name":
-                    (
-                        sender_name.strip()
-                        if sender_name.strip()
-                        else "Anonymous"
-                    ),
-
-                "sentiment":
-                    analysis.get(
-                        "sentiment",
-                        "Neutral"
-                    ),
-
-                "emoji_tag":
-                    analysis.get(
-                        "emoji_tag",
-                        ""
-                    ),
-
-                "keywords":
-                    ", ".join(
-                        analysis.get(
-                            "keywords",
-                            []
-                        )
-                    ),
-
-                "suggestion":
-                    analysis.get(
-                        "suggestion",
-                        ""
-                    ),
-
-                "views":
-                    0,
-
-                "note_color":
-                    note_color,
-
-                "meaning":
-                    "",
-
-                "emotion":
-                    "",
-
-                "secondary_emotion":
-                    "",
-
-                "intensity":
-                    "",
-
-                "analyzed_at":
-                    "",
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                "target_type": "Recipient",
+                "target_name": target_name.strip(),
+                "message": message.strip(),
+                "sender_name": sender_name.strip() if sender_name.strip() else "Anonymous",
+                "sentiment": analysis.get("sentiment", "Neutral"),
+                "emoji_tag": analysis.get("emoji_tag", ""),
+                "keywords": ", ".join(analysis.get("keywords", [])),
+                "suggestion": analysis.get("suggestion", ""),
+                "views": 0,
+                "note_color": note_color,
             }
+            save_message(new_row)
+            st.success("Your message has been posted to the wall. 🎓")
+            render_card(new_row)
 
-
-            saved = save_message(
-                new_row
-            )
-
-
-            if saved:
-
-                st.success(
-                    "Your message has been posted "
-                    "to the wall. 🎓"
-                )
-
-                render_card(
-                    new_row
-                )
-
-
-# ==========================================================================
-# TAB 2 — BROWSE WALL
-# ==========================================================================
-
-elif (
-    st.session_state.active_tab
-    == TAB_OPTIONS[1]
-):
-
-    st.subheader(
-        "The Wall"
-    )
-
-    st.caption(
-        "Tap any paper to open its meaning "
-        "and emotion review."
-    )
-
-
+# ---- TAB 2: Browse the wall ----
+elif st.session_state.active_tab == TAB_OPTIONS[1]:
+    st.subheader("The Wall")
     df = load_data()
 
-
-    name_filter = st.text_input(
-        "Search by recipient name",
-        placeholder=(
-            "🔍 Search recipient..."
-        ),
-    )
-
+    name_filter = st.text_input("Search by recipient name", placeholder="🔍 Search recipient...")
 
     filtered = df.copy()
-
-
     if name_filter.strip():
-
         filtered = filtered[
-            filtered[
-                "target_name"
-            ]
-            .astype(str)
-            .str.contains(
-                name_filter.strip(),
-                case=False,
-                na=False,
-                regex=False,
-            )
+            filtered["target_name"].astype(str).str.contains(name_filter.strip(), case=False, na=False, regex=False)
         ]
-
 
     if filtered.empty:
-
-        st.info(
-            "No messages match your search yet."
-        )
-
+        st.info("No messages match your search yet.")
     else:
-
-        filtered["_sort_id"] = (
-            pd.to_numeric(
-                filtered["id"],
-                errors="coerce"
-            )
-            .fillna(0)
-        )
-
-
-        rows = (
-            filtered
-            .sort_values(
-                "_sort_id",
-                ascending=False,
-            )
-            .drop(
-                columns=[
-                    "_sort_id"
-                ]
-            )
-            .to_dict(
-                orient="records"
-            )
-        )
-
-
-        cols = st.columns(3)
-
-
-        for i, note_row in enumerate(
-            rows
-        ):
-
-            with cols[
-                i % 3
-            ]:
-
-                try:
-
-                    note_id = int(
-                        float(
-                            note_row["id"]
-                        )
-                    )
-
-                except Exception:
-
-                    note_id = i + 1
-
-
-                with st.container(
-                    key=f"note_wrap_{note_id}"
-                ):
-
-                    st.markdown(
-                        _note_html(
-                            note_row
-                        ),
-                        unsafe_allow_html=True,
-                    )
-
-
-                    if st.button(
-                        "open note",
-                        key=f"view_note_{note_id}",
-                    ):
-
-                        st.session_state.selected_note_id = (
-                            note_id
-                        )
-
+        st.caption("Tap anywhere on a note to open its AI meaning and emotion review.")
+        rows = filtered.sort_values("id", ascending=False).to_dict(orient="records")
+        n_cols = 3
+        cols = st.columns(n_cols)
+        for i, note_row in enumerate(rows):
+            with cols[i % n_cols]:
+                with st.container(key=f"note_wrap_{note_row['id']}"):
+                    st.markdown(_note_html(note_row), unsafe_allow_html=True)
+                    if st.button("View note", key=f"view_note_{note_row['id']}"):
+                        st.session_state.selected_note_id = note_row["id"]
                         st.session_state.note_modal_open = True
-
-                        st.session_state.chat_open = False
-
                         st.rerun()
 
-
-# ==========================================================================
-# TAB 3 — INSIGHTS
-# ==========================================================================
-
-elif (
-    st.session_state.active_tab
-    == TAB_OPTIONS[2]
-):
-
-    st.subheader(
-        "💭 Confession Wall Insights"
-    )
-
-    st.caption(
-        "A visual summary of what people "
-        "are sharing on the wall."
-    )
-
-
+# ---- TAB 3: Insights dashboard ----
+elif st.session_state.active_tab == TAB_OPTIONS[2]:
+    st.subheader("🧠 Confession Wall Insights")
+    st.caption("A quick look at what people are sharing on the wall.")
     df = load_data()
+    analyzed = df[df["sentiment"].notna() & (df["sentiment"] != "")]
+    emotion_analyzed = df[df["emotion"].notna() & (df["emotion"] != "")]
 
-
-    total = len(df)
-
-
-    analyzed = df[
-        df["sentiment"]
-        .fillna("")
-        .astype(str)
-        .str.strip()
-        != ""
-    ]
-
-
-    emotion_analyzed = df[
-        df["emotion"]
-        .fillna("")
-        .astype(str)
-        .str.strip()
-        != ""
-    ]
-
-
-    # ==============================================================
-    # KPI DATA
-    # ==============================================================
-
-    today = datetime.now().strftime(
-        "%Y-%m-%d"
-    )
-
-
-    if not df.empty:
-
-        today_count = int(
-            df["timestamp"]
-            .astype(str)
-            .str.startswith(
-                today
-            )
-            .sum()
-        )
-
+    if analyzed.empty and emotion_analyzed.empty:
+        st.info("No analyzed messages yet. Post a message, or open one on the Browse Wall, to see insights.")
     else:
-
-        today_count = 0
-
-
-    topic_series = (
-        analyzed[
-            "keywords"
-        ]
-        .dropna()
-        .astype(str)
-        .str.split(", ")
-        .explode()
-    )
-
-
-    topic_series = topic_series[
-        topic_series
-        .str.strip()
-        != ""
-    ]
-
-
-    active_topics = (
-        int(
-            topic_series.nunique()
-        )
-        if not topic_series.empty
-        else 0
-    )
-
-
-    analyzed_count = len(
-        emotion_analyzed
-    )
-
-
-    # ==============================================================
-    # INSIGHTS CSS
-    # ==============================================================
-
-    st.markdown(
-        """
-        <style>
-
-        .ins-grid {
-
-            display:
-                grid;
-
-            grid-template-columns:
-                repeat(4,1fr);
-
-            gap:
-                14px;
-
-            margin:
-                10px 0 24px;
-        }
-
-        .ins-card {
-
-            background:
-                linear-gradient(
-                    145deg,
-                    #21192d,
-                    #17121f
-                );
-
-            border:
-                1px solid
-                rgba(255,255,255,.08);
-
-            border-radius:
-                18px;
-
-            padding:
-                18px;
-        }
-
-        .ins-label {
-
-            color:
-                #a99db7;
-
-            font:
-                700 11px
-                Quicksand,
-                sans-serif;
-
-            text-transform:
-                uppercase;
-
-            letter-spacing:
-                1px;
-        }
-
-        .ins-value {
-
-            color:
-                #fff;
-
-            font:
-                700 30px
-                Quicksand,
-                sans-serif;
-
-            margin-top:
-                6px;
-        }
-
-        .ins-small {
-
-            color:
-                #7f748c;
-
-            font:
-                400 11px
-                Quicksand,
-                sans-serif;
-
-            margin-top:
-                4px;
-        }
-
-        .ins-section {
-
-            background:
-                #19141f;
-
-            border:
-                1px solid
-                rgba(255,255,255,.07);
-
-            border-radius:
-                18px;
-
-            padding:
-                18px;
-
-            margin:
-                14px 0;
-        }
-
-        .ins-title {
-
-            color:
-                #f4edf8;
-
-            font:
-                700 16px
-                Quicksand,
-                sans-serif;
-
-            margin-bottom:
-                3px;
-        }
-
-        .ins-sub {
-
-            color:
-                #8f8499;
-
-            font:
-                400 11px
-                Quicksand,
-                sans-serif;
-        }
-
-        .emotion-row {
-
-            display:
-                flex;
-
-            align-items:
-                center;
-
-            justify-content:
-                space-between;
-
-            padding:
-                9px 0;
-
-            border-bottom:
-                1px solid
-                rgba(255,255,255,.05);
-
-            color:
-                #ddd4e4;
-
-            font:
-                600 13px
-                Quicksand,
-                sans-serif;
-        }
-
-        .emotion-count {
-
-            color:
-                #a99db7;
-
-            font-size:
-                12px;
-        }
-
-        @media(max-width:800px) {
-
-            .ins-grid {
-                grid-template-columns:
-                    repeat(2,1fr);
-            }
-        }
-
-        @media(max-width:480px) {
-
-            .ins-grid {
-                grid-template-columns:
-                    1fr;
-            }
-        }
-
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-    # ==============================================================
-    # KPI CARDS
-    # ==============================================================
-
-    st.markdown(
-        f"""
-        <div class="ins-grid">
-
-            <div class="ins-card">
-
-                <div class="ins-label">
-                    💬 Total Notes
-                </div>
-
-                <div class="ins-value">
-                    {total}
-                </div>
-
-                <div class="ins-small">
-                    all posts on the wall
-                </div>
-
-            </div>
-
-
-            <div class="ins-card">
-
-                <div class="ins-label">
-                    🕐 Posted Today
-                </div>
-
-                <div class="ins-value">
-                    {today_count}
-                </div>
-
-                <div class="ins-small">
-                    based on the current date
-                </div>
-
-            </div>
-
-
-            <div class="ins-card">
-
-                <div class="ins-label">
-                    😊 Analyzed
-                </div>
-
-                <div class="ins-value">
-                    {analyzed_count}
-                </div>
-
-                <div class="ins-small">
-                    notes with emotion review
-                </div>
-
-            </div>
-
-
-            <div class="ins-card">
-
-                <div class="ins-label">
-                    🔥 Topics
-                </div>
-
-                <div class="ins-value">
-                    {active_topics}
-                </div>
-
-                <div class="ins-small">
-                    distinct extracted themes
-                </div>
-
-            </div>
-
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-    # ==============================================================
-    # EMPTY DATA
-    # ==============================================================
-
-    if df.empty:
-
-        st.info(
-            "No messages have been posted yet."
-        )
-
-
-    else:
-
-        # ==========================================================
-        # SENTIMENT + TOPICS
-        # ==========================================================
-
-        left, right = st.columns(
-            2
-        )
-
-
-        with left:
-
-            st.markdown(
-                """
-                <div class="ins-section">
-
-                    <div class="ins-title">
-                        💗 Message Tone
-                    </div>
-
-                    <div class="ins-sub">
-                        Based on the initial AI
-                        analysis when notes were posted.
-                    </div>
-
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-
-
-            if analyzed.empty:
-
-                st.info(
-                    "No analyzed notes yet."
-                )
-
+        c1, c2 = st.columns(2)
+        with c1:
+            if not analyzed.empty:
+                sentiment_counts = analyzed["sentiment"].value_counts().reset_index()
+                sentiment_counts.columns = ["sentiment", "count"]
+                fig = px.pie(sentiment_counts, names="sentiment", values="count", title="Sentiment Distribution")
+                st.plotly_chart(fig, use_container_width=True)
             else:
+                st.info("No sentiment data yet.")
 
-                counts = (
-                    analyzed[
-                        "sentiment"
-                    ]
-                    .value_counts()
-                    .reset_index()
-                )
-
-                counts.columns = [
-                    "sentiment",
-                    "count",
-                ]
-
-
-                fig = px.pie(
-                    counts,
-                    names="sentiment",
-                    values="count",
-                    hole=.55,
-                )
-
-
-                fig.update_layout(
-                    margin=dict(
-                        l=10,
-                        r=10,
-                        t=10,
-                        b=10,
-                    ),
-                    height=300,
-                    paper_bgcolor=(
-                        "rgba(0,0,0,0)"
-                    ),
-                    plot_bgcolor=(
-                        "rgba(0,0,0,0)"
-                    ),
-                    font_color="#ddd4e4",
-                    legend_title_text="",
-                )
-
-
-                st.plotly_chart(
-                    fig,
-                    use_container_width=True,
-                    config={
-                        "displayModeBar": False
-                    },
-                )
-
-
-        with right:
-
-            st.markdown(
-                """
-                <div class="ins-section">
-
-                    <div class="ins-title">
-                        🔥 What People Talk About
-                    </div>
-
-                    <div class="ins-sub">
-                        Top themes extracted
-                        from posted notes.
-                    </div>
-
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-
-
-            if topic_series.empty:
-
-                st.info(
-                    "No theme data yet."
-                )
-
+        with c2:
+            all_keywords = analyzed["keywords"].dropna().str.split(", ").explode()
+            all_keywords = all_keywords[all_keywords != ""]
+            if not all_keywords.empty:
+                kw_counts = all_keywords.value_counts().head(10).reset_index()
+                kw_counts.columns = ["keyword", "count"]
+                fig2 = px.bar(kw_counts, x="keyword", y="count", title="Most Common Themes")
+                st.plotly_chart(fig2, use_container_width=True)
             else:
-
-                kw = (
-                    topic_series
-                    .value_counts()
-                    .head(8)
-                    .sort_values()
-                )
-
-
-                fig2 = px.bar(
-                    x=kw.values,
-                    y=kw.index,
-                    orientation="h",
-                )
-
-
-                fig2.update_layout(
-                    margin=dict(
-                        l=10,
-                        r=10,
-                        t=10,
-                        b=10,
-                    ),
-                    height=300,
-                    paper_bgcolor=(
-                        "rgba(0,0,0,0)"
-                    ),
-                    plot_bgcolor=(
-                        "rgba(0,0,0,0)"
-                    ),
-                    font_color="#ddd4e4",
-                    xaxis_title="mentions",
-                    yaxis_title="",
-                )
-
-
-                st.plotly_chart(
-                    fig2,
-                    use_container_width=True,
-                    config={
-                        "displayModeBar": False
-                    },
-                )
-
-
-        # ==========================================================
-        # ACTIVITY OVER TIME
-        # ==========================================================
-
-        st.markdown(
-            """
-            <div class="ins-section">
-
-                <div class="ins-title">
-                    📈 Wall Activity
-                </div>
-
-                <div class="ins-sub">
-                    How many notes were posted over time.
-                </div>
-
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-
-        dates = pd.to_datetime(
-            df["timestamp"],
-            errors="coerce",
-        ).dt.date
-
-
-        activity = (
-            dates
-            .value_counts()
-            .sort_index()
-            .reset_index()
-        )
-
-
-        activity.columns = [
-            "date",
-            "notes",
-        ]
-
-
-        if not activity.empty:
-
-            fig3 = px.line(
-                activity,
-                x="date",
-                y="notes",
-                markers=True,
-            )
-
-
-            fig3.update_layout(
-                margin=dict(
-                    l=10,
-                    r=10,
-                    t=10,
-                    b=10,
-                ),
-                height=260,
-                paper_bgcolor=(
-                    "rgba(0,0,0,0)"
-                ),
-                plot_bgcolor=(
-                    "rgba(0,0,0,0)"
-                ),
-                font_color="#ddd4e4",
-                xaxis_title="",
-                yaxis_title="notes",
-            )
-
-
-            st.plotly_chart(
-                fig3,
-                use_container_width=True,
-                config={
-                    "displayModeBar": False
-                },
-            )
-
-
-        # ==========================================================
-        # EMOTIONS + WALL PULSE
-        # ==========================================================
-
-        left, right = st.columns(
-            2
-        )
-
-
-        with left:
-
-            st.markdown(
-                """
-                <div class="ins-section">
-
-                    <div class="ins-title">
-                        😊 Emotions on the Wall
-                    </div>
-
-                    <div class="ins-sub">
-                        Emotion data saved by
-                        the individual note analyzer.
-                    </div>
-
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-
-
-            if emotion_analyzed.empty:
-
-                st.info(
-                    "Open notes on Browse Wall "
-                    "to generate emotion reviews."
-                )
-
-            else:
-
-                emotions = (
-                    emotion_analyzed[
-                        "emotion"
-                    ]
-                    .value_counts()
-                )
-
-
-                for (
-                    emotion,
-                    count,
-                ) in emotions.head(7).items():
-
-                    icon = (
-                        EMOTION_CATEGORIES.get(
-                            emotion,
-                            "😐"
-                        )
-                    )
-
-
-                    percentage = int(
-                        round(
-                            count
-                            /
-                            len(
-                                emotion_analyzed
-                            )
-                            * 100
-                        )
-                    )
-
-
-                    st.markdown(
-                        f"""
-                        <div class="emotion-row">
-
-                            <span>
-                                {icon}
-                                {_clean(emotion)}
-                            </span>
-
-                            <span class="emotion-count">
-                                {count}
-                                ·
-                                {percentage}%
-                            </span>
-
-                        </div>
-                        """,
-                        unsafe_allow_html=True,
-                    )
-
-
-        with right:
-
-            st.markdown(
-                """
-                <div class="ins-section">
-
-                    <div class="ins-title">
-                        💡 Wall Pulse
-                    </div>
-
-                    <div class="ins-sub">
-                        A quick read from
-                        the data currently available.
-                    </div>
-
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-
-
-            if analyzed.empty:
-
-                st.info(
-                    "More analyzed notes are needed "
-                    "for wall insights."
-                )
-
-            else:
-
-                top_sentiment = (
-                    analyzed[
-                        "sentiment"
-                    ]
-                    .value_counts()
-                    .idxmax()
-                )
-
-
-                if not topic_series.empty:
-
-                    top_theme = (
-                        topic_series
-                        .value_counts()
-                        .idxmax()
-                    )
-
-                else:
-
-                    top_theme = (
-                        "No dominant theme yet"
-                    )
-
-
-                st.markdown(
-                    f"- **Most common tone:** "
-                    f"{_clean(top_sentiment)}"
-                )
-
-                st.markdown(
-                    f"- **Most mentioned theme:** "
-                    f"{_clean(top_theme)}"
-                )
-
-                st.markdown(
-                    f"- **Notes analyzed:** "
-                    f"{len(analyzed)} of {total}"
-                )
-
-
-                if not emotion_analyzed.empty:
-
-                    top_emotion = (
-                        emotion_analyzed[
-                            "emotion"
-                        ]
-                        .value_counts()
-                        .idxmax()
-                    )
-
-
-                    st.markdown(
-                        f"- **Most common emotion:** "
-                        f"{EMOTION_CATEGORIES.get(top_emotion, '😐')} "
-                        f"{_clean(top_emotion)}"
-                    )
-
-
-        # ==========================================================
-        # SUGGESTIONS
-        # ==========================================================
-
-        suggestions = analyzed[
-            analyzed[
-                "suggestion"
-            ]
-            .fillna("")
-            .astype(str)
-            .str.strip()
-            != ""
-        ]
-
-
-        st.markdown(
-            """
-            <div class="ins-section">
-
-                <div class="ins-title">
-                    💡 Messages That Include Suggestions
-                </div>
-
-                <div class="ins-sub">
-                    Suggestions or concerns
-                    detected from individual notes.
-                </div>
-
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-
-        if suggestions.empty:
-
-            st.info(
-                "No suggestions have been extracted yet."
-            )
-
+                st.info("Not enough keyword data yet.")
+
+        # Emotions on the Wall — fed by the same per-note analysis shown in the
+        # Confession Analyzer modal (Browse Wall → 🔍 View). Same data, same chart.
+        st.markdown("### 😊 Emotions on the Wall")
+        if emotion_analyzed.empty:
+            st.info("No confessions analyzed yet — open a note on the Browse Wall and tap 🔍 View.")
         else:
-
-            for _, row in (
-                suggestions
-                .head(8)
-                .iterrows()
-            ):
-
-                st.markdown(
-                    f"- **{_clean(row['target_name'])}:** "
-                    f"{_clean(row['suggestion'])}"
-                )
-
-
-        # ==========================================================
-        # DATASET PREVIEW
-        # ==========================================================
-
-        with st.expander(
-            "📊 Dataset Preview"
-        ):
-
-            st.caption(
-                "This is the current dataset used by "
-                "the Confession Wall application."
+            emo_counts = emotion_analyzed["emotion"].value_counts().reset_index()
+            emo_counts.columns = ["emotion", "count"]
+            emo_counts["label"] = emo_counts["emotion"].apply(
+                lambda e: f"{EMOTION_CATEGORIES.get(e, '')} {e}"
             )
+            fig3 = px.bar(emo_counts, x="label", y="count", title="Most Common Emotions (from analyzed confessions)")
+            st.plotly_chart(fig3, use_container_width=True)
+            top = emo_counts.iloc[0]
+            st.caption(f"Most common emotion so far: **{top['label']}**")
 
-            preview_columns = [
-                "id",
-                "timestamp",
-                "target_name",
-                "message",
-                "sender_name",
-                "sentiment",
-                "keywords",
-                "suggestion",
-            ]
+        st.markdown("### 💡 Wall Insights")
+        st.caption("AI-generated notes surfaced from what people are posting — not a school evaluation.")
+        suggestions = analyzed[analyzed["suggestion"].notna() & (analyzed["suggestion"] != "")]
+        if suggestions.empty:
+            st.info("No wall insights extracted yet.")
+        else:
+            for _, row in suggestions.iterrows():
+                st.markdown(f"- **[{row['target_name']}]** {row['suggestion']}")
 
+        st.markdown("### 💾 Backup your data")
+        st.caption("Download the current notes before editing the app code, so nothing gets lost on the next deploy.")
+        st.download_button(
+            "Download messages.csv",
+            data=df.to_csv(index=False),
+            file_name="messages_backup.csv",
+            mime="text/csv",
+        )
 
-            available_columns = [
-                column
-                for column in preview_columns
-                if column in df.columns
-            ]
-
-
-            st.dataframe(
-                df[
-                    available_columns
-                ],
-                use_container_width=True,
-                hide_index=True,
-            )
-
-
-        # ==========================================================
-        # DATA MANAGEMENT
-        # ==========================================================
-
-        with st.expander(
-            "💾 Data Management"
-        ):
-
-            st.caption(
-                "Download a backup of the current "
-                "wall data before changing or "
-                "redeploying the app."
-            )
-
-
-            st.download_button(
-                "Download messages.csv",
-                data=df.to_csv(
-                    index=False
-                ),
-                file_name=(
-                    "messages_backup.csv"
-                ),
-                mime="text/csv",
-            )
+        st.info("💬 Tap the chat icon (top-right, any tab) to ask about the confessions on the wall.")
