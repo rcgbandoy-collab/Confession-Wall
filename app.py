@@ -7,7 +7,8 @@ farewell messages addressed to a teacher, official, or location (e.g. canteen,
 library). GenAI analyzes each message for sentiment, theme, and suggestions,
 and an insights dashboard summarizes everything for the school.
 
-UI: paper-note wall, free-text recipient, note-color picker.
+UI: paper-note wall, free-text recipient, note-color picker, floating
+purple iOS-style AI chat widget.
 """
 
 import html
@@ -157,73 +158,133 @@ def save_message(row: dict):
 
 
 # --------------------------------------------------------------------------
-# STYLING (cute pink paper-note wall)
+# STYLING (paper-note wall + purple iOS-style chat widget)
 # --------------------------------------------------------------------------
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Caveat:wght@500;700&family=Quicksand:wght@400;600;700&display=swap');
 
-.stApp { background: linear-gradient(180deg, #1a1620 0%, #221a28 100%); color: #f3e9f0; }
-.stApp h1, .stApp h2, .stApp h3, .stApp label, .stApp p, .stApp span { font-family: 'Quicksand', sans-serif; }
-.stApp h1, .stApp h2, .stApp h3 { color: #ff9ebd; }
-.stApp label p { color: #e3c9db !important; font-weight: 700; letter-spacing: .5px; }
-.stCaption, [data-testid="stCaptionContainer"] { color: #b79cff !important; }
-
-/* Wall: masonry-style columns (3 desktop / 2 tablet / 1 phone) */
+/* ---------- Paper wall ---------- */
 .wall { column-count: 3; column-gap: 26px; padding: 12px 6px 30px; }
 @media (max-width: 900px) { .wall { column-count: 2; } }
 @media (max-width: 600px) { .wall { column-count: 1; } }
 
-/* A paper note — stays bright/pastel so it pops against the dark background */
 .note {
-    --tilt: 0deg;
+    --tilt: 0deg; --tape: #ddd; --ink: #333; --sub: #777;
     position: relative;
     display: inline-block; width: 100%;
     break-inside: avoid; box-sizing: border-box;
     margin: 0 0 30px; padding: 30px 24px 18px;
     border-radius: 6px 6px 18px 6px;
-    box-shadow: 0 8px 20px rgba(0, 0, 0, 0.45);
+    box-shadow: 0 6px 16px rgba(0, 0, 0, 0.20);
     transform: rotate(var(--tilt));
     transition: transform .25s ease, box-shadow .25s ease;
     text-align: left; overflow-wrap: anywhere;
-    background-image: repeating-linear-gradient(transparent 0 27px, rgba(0,0,0,0.05) 27px 28px);
+    background-image: repeating-linear-gradient(transparent 0 27px, rgba(128,128,128,0.16) 27px 28px);
 }
-.note:hover { transform: rotate(0deg) translateY(-6px) scale(1.02); box-shadow: 0 16px 32px rgba(0,0,0,.55); }
-.note::before {   /* tape */
+.note:hover { transform: rotate(0deg) translateY(-6px) scale(1.02); box-shadow: 0 14px 28px rgba(0,0,0,.28); }
+.note::before {
     content: ''; position: absolute; top: -12px; left: 50%;
     width: 84px; height: 24px; transform: translateX(-50%) rotate(-3deg);
     background: var(--tape); opacity: .8; border-radius: 3px;
 }
 .note-to { font-family: 'Quicksand', sans-serif; font-weight: 700; font-size: 13px;
-           letter-spacing: 1px; text-transform: uppercase; color: #7a5a6c; }
-.note-msg { font-family: 'Caveat', cursive; font-size: 25px; line-height: 28px; color: #3b2f38; margin: 14px 0; }
-.note-tag { display: inline-block; background: rgba(255,255,255,.7); color: #8a4a72;
+           letter-spacing: 1px; text-transform: uppercase; color: var(--sub); }
+.note-msg { font-family: 'Caveat', cursive; font-size: 25px; line-height: 28px; color: var(--ink); margin: 14px 0; }
+.note-tag { display: inline-block; background: rgba(128,128,128,.22); color: var(--ink);
             padding: 3px 12px; border-radius: 999px; font-size: 12px; font-family: 'Quicksand', sans-serif; }
-.note-from { font-family: 'Caveat', cursive; font-size: 21px; color: #6b5262; margin-top: 10px; }
-.note-date { font-family: 'Quicksand', sans-serif; font-size: 11px; color: #9a8592; margin-top: 4px; }
-.note-deco { position: absolute; right: 14px; bottom: 10px; font-size: 16px; opacity: .8; }
+.note-from { font-family: 'Caveat', cursive; font-size: 21px; color: var(--sub); margin-top: 10px; }
+.note-date { font-family: 'Quicksand', sans-serif; font-size: 11px; color: var(--sub); margin-top: 4px; }
 
-/* Single note (preview after posting) */
 .single { max-width: 420px; margin: 24px auto; }
 
-/* Chat bubbles — cute font for a more human feel */
-[data-testid="stChatMessage"] p { font-family: 'Quicksand', sans-serif; font-size: 15px; }
+/* ---------- Floating purple AI chat widget ---------- */
 
-/* Floating chat popover: light Messenger-style panel */
+/* the popover trigger becomes a round floating purple FAB */
+[data-testid="stPopover"] button {
+    background: linear-gradient(135deg, #7c3aed, #9333ea) !important;
+    color: #fff !important;
+    border: none !important;
+    border-radius: 50% !important;
+    width: 54px !important; height: 54px !important;
+    padding: 0 !important;
+    font-size: 22px !important;
+    box-shadow: 0 6px 18px rgba(124, 58, 237, .45) !important;
+    transition: transform .15s ease, box-shadow .15s ease !important;
+}
+[data-testid="stPopover"] button:hover {
+    transform: scale(1.06);
+    box-shadow: 0 8px 22px rgba(124, 58, 237, .6) !important;
+}
+
+/* the chat panel itself: rounded, white, sharp (never blurred) */
 [data-testid="stPopoverBody"] {
-    background: #f4f6f8 !important;
-    border-radius: 16px !important;
-    padding: 14px !important;
+    background: #ffffff !important;
+    border-radius: 20px !important;
+    padding: 0 !important;
+    width: 340px !important;
+    box-shadow: 0 20px 50px rgba(0,0,0,.35) !important;
+    overflow: hidden !important;
+    animation: cwOpen .18s ease-out;
 }
-.chat-bubble-row { display: flex; align-items: flex-end; gap: 8px; margin: 8px 0; }
-.chat-bubble-row.me { flex-direction: row-reverse; }
-.chat-avatar { font-size: 20px; }
-.chat-bubble {
+@keyframes cwOpen {
+    from { opacity: 0; transform: translateY(10px) scale(.97); }
+    to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+/* blur + dim the page behind the chat while it's open (existing site stays visible) */
+body:has([data-testid="stPopoverBody"]) [data-testid="stAppViewContainer"] > .main {
+    filter: blur(3px) brightness(.85);
+    transition: filter .2s ease;
+}
+
+.cw-header {
+    background: linear-gradient(135deg, #7c3aed, #9333ea);
+    color: #fff; padding: 14px 18px;
+    font-family: 'Quicksand', sans-serif;
+}
+.cw-header-title { font-weight: 700; font-size: 15px; }
+.cw-header-sub { font-size: 12px; opacity: .85; margin-top: 2px; }
+
+.cw-body { padding: 12px 14px 4px; max-height: 340px; overflow-y: auto; }
+.cw-row { display: flex; margin: 7px 0; animation: cwIn .2s ease; }
+.cw-row.ai { justify-content: flex-start; }
+.cw-row.user { justify-content: flex-end; }
+@keyframes cwIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+
+.cw-label { font-family: 'Quicksand', sans-serif; font-size: 10px; color: #999; margin: 0 4px 2px; text-align: right; }
+.cw-row.ai .cw-label { text-align: left; }
+
+.cw-bubble {
+    max-width: 78%; padding: 9px 14px; border-radius: 16px;
     font-family: 'Quicksand', sans-serif; font-size: 14px; line-height: 1.4;
-    padding: 9px 14px; border-radius: 16px; max-width: 220px;
+    box-shadow: 0 1px 2px rgba(0,0,0,.08);
 }
-.chat-bubble.them { background: #e6e8eb; color: #222; border-bottom-left-radius: 4px; }
-.chat-bubble.me { background: #4fd1c5; color: #06342f; border-bottom-right-radius: 4px; }
+.cw-bubble.ai { background: #7c3aed; color: #fff; border-bottom-left-radius: 4px; }
+.cw-bubble.user { background: #f1f0f5; color: #222; border-bottom-right-radius: 4px; }
+
+.cw-typing {
+    display: inline-flex; gap: 4px; padding: 12px 14px;
+    background: #7c3aed; border-radius: 16px; border-bottom-left-radius: 4px;
+}
+.cw-typing span {
+    width: 6px; height: 6px; border-radius: 50%; background: #fff;
+    animation: cwBlink 1.2s infinite ease-in-out;
+}
+.cw-typing span:nth-child(2) { animation-delay: .2s; }
+.cw-typing span:nth-child(3) { animation-delay: .4s; }
+@keyframes cwBlink { 0%, 80%, 100% { opacity: .3; } 40% { opacity: 1; } }
+
+.cw-inputbar { border-top: 1px solid #eee; padding: 10px 12px; background: #fff; }
+.cw-inputbar [data-testid="stTextInput"] input {
+    border-radius: 999px !important; border: 1px solid #ddd !important;
+    padding: 8px 14px !important; font-family: 'Quicksand', sans-serif !important;
+}
+.cw-inputbar button {
+    background: #7c3aed !important; color: #fff !important; border: none !important;
+    border-radius: 50% !important; width: 36px !important; height: 36px !important;
+    padding: 0 !important;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -244,7 +305,7 @@ def _note_html(row) -> str:
         rid = 0
     if color not in NOTE_COLORS:  # older rows: stable color from their id
         color = FALLBACK_COLORS[rid % len(FALLBACK_COLORS)]
-    _, paper, tape, _ink, _sub = NOTE_COLORS[color]
+    _, paper, tape, ink, sub = NOTE_COLORS[color]
     tilt = TILTS[rid % len(TILTS)]
     try:
         date = pd.to_datetime(row.get("timestamp")).strftime("%B %d, %Y")
@@ -254,13 +315,12 @@ def _note_html(row) -> str:
     tag = _clean(row.get("emoji_tag", ""))
     tag_html = f'<span class="note-tag">{tag}</span>' if tag else ""
     return (
-        f'<div class="note" style="background-color:{paper};--tape:{tape};--tilt:{tilt}deg;">'
-        f'<div class="note-to">💌 To: {_clean(row["target_name"])}</div>'
+        f'<div class="note" style="background-color:{paper};--tape:{tape};--ink:{ink};--sub:{sub};--tilt:{tilt}deg;">'
+        f'<div class="note-to">To: {_clean(row["target_name"])}</div>'
         f'<div class="note-msg">{msg}</div>'
         f'{tag_html}'
         f'<div class="note-from">— {_clean(row["sender_name"])}</div>'
         f'<div class="note-date">{date}</div>'
-        f'<div class="note-deco">✨</div>'
         f'</div>'
     )
 
@@ -280,46 +340,74 @@ def render_wall(df: pd.DataFrame):
 # APP LAYOUT
 # --------------------------------------------------------------------------
 st.title("🎓 Confession Wall")
-st.caption("Say what's on your mind")
+st.caption("Say what's on your mind about teachers, rooms, staff, or fellow students.")
 
-# ---- Floating chat bubble (Messenger-style, visible on every tab) ----
-_chat_col = st.columns([6, 1])[1]
+# ---- Floating purple AI chat widget (visible on every tab) ----
+_chat_col = st.columns([8, 1])[1]
 with _chat_col:
     with st.popover("💬", use_container_width=True):
-        st.markdown("**Chat with the Wall**")
-        st.caption("Ask anything about the messages posted here.")
+        st.markdown(
+            '<div class="cw-header">'
+            '<div class="cw-header-title">AI Assistant</div>'
+            '<div class="cw-header-sub">Ask anything about the messages posted here.</div>'
+            '</div>',
+            unsafe_allow_html=True,
+        )
 
         if "chat_history" not in st.session_state:
             st.session_state.chat_history = []
+        if "chat_pending" not in st.session_state:
+            st.session_state.chat_pending = None
 
+        body_html = '<div class="cw-body">'
         for turn in st.session_state.chat_history:
-            avatar = "🧑" if turn["role"] == "user" else "🤖"
-            side = "me" if turn["role"] == "user" else "them"
-            st.markdown(
-                f'<div class="chat-bubble-row {side}">'
-                f'<div class="chat-avatar">{avatar}</div>'
-                f'<div class="chat-bubble {side}">{html.escape(turn["content"])}</div>'
-                f'</div>',
-                unsafe_allow_html=True,
+            is_ai = turn["role"] != "user"
+            side = "ai" if is_ai else "user"
+            label = "AI" if is_ai else "You"
+            body_html += (
+                f'<div class="cw-row {side}"><div>'
+                f'<div class="cw-label">{label}</div>'
+                f'<div class="cw-bubble {side}">{html.escape(turn["content"])}</div>'
+                f'</div></div>'
             )
+        if st.session_state.chat_pending:
+            body_html += (
+                '<div class="cw-row ai"><div>'
+                '<div class="cw-label">AI</div>'
+                '<div class="cw-typing"><span></span><span></span><span></span></div>'
+                '</div></div>'
+            )
+        body_html += "</div>"
+        st.markdown(body_html, unsafe_allow_html=True)
 
+        # If a question is pending, generate the reply now (shows the typing
+        # dots above for this render, then reruns with the real answer).
+        if st.session_state.chat_pending:
+            question = st.session_state.chat_pending
+            _full_df = load_data()
+            _analyzed = _full_df[_full_df["sentiment"].notna() & (_full_df["sentiment"] != "")]
+            answer = chatbot_answer(question, _analyzed, st.session_state.chat_history)
+            st.session_state.chat_history.append({"role": "assistant", "content": answer})
+            st.session_state.chat_pending = None
+            st.rerun()
+
+        st.markdown('<div class="cw-inputbar">', unsafe_allow_html=True)
         with st.form("popover_chat_form", clear_on_submit=True):
             colA, colB = st.columns([5, 1])
             with colA:
-                user_q = st.text_input("msg", placeholder="Write your message...", label_visibility="collapsed")
+                user_q = st.text_input(
+                    "msg", placeholder="Type a message...", label_visibility="collapsed"
+                )
             with colB:
                 send = st.form_submit_button("➤")
+        st.markdown('</div>', unsafe_allow_html=True)
 
         if send and user_q.strip():
             st.session_state.chat_history.append({"role": "user", "content": user_q})
-            _full_df = load_data()
-            _analyzed = _full_df[_full_df["sentiment"].notna() & (_full_df["sentiment"] != "")]
-            with st.spinner("typing..."):
-                answer = chatbot_answer(user_q, _analyzed, st.session_state.chat_history)
-            st.session_state.chat_history.append({"role": "assistant", "content": answer})
+            st.session_state.chat_pending = user_q
             st.rerun()
 
-tab1, tab2, tab3 = st.tabs(["✏ Leave a Message", "📝 Browse Wall", "📊 Insights"])
+tab1, tab2, tab3 = st.tabs(["✏️ Leave a Message", "📝 Browse Wall", "📊 Insights"])
 
 # ---- TAB 1: Submit a message ----
 with tab1:
