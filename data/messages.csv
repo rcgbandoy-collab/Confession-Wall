@@ -5,4 +5,5 @@ id,timestamp,target_type,target_name,message,sender_name,sentiment,emoji_tag,key
 4,2026-09-04 16:45,Location,Library,"The wifi in the library is so slow, it was hard to do research there. Please upgrade it for future students.",Anonymous,,,,,,,,,,,
 5,2026-09-05 11:20,General,School Administration,Four years here changed me. I just wish there were more mental health resources available for students who are struggling.,Anonymous,,,,,,,,,,,
 6,2026-09-24 17:47,Teacher,ma'am cath,"hello, ma'am cath!",bandoy,Grateful,🙏 Appreciative,"teaching, experience",The student appreciates the teacher's efforts.,,,,,,,
-7,2026-09-25 13:48,Recipient,shaira,"hello, shaira!",chirro,Neutral,👋 Casual,"goodbye, farewell",,0,Red,,,,,
+7,2026-09-25 13:48,Recipient,shaira,"hello, shaira!",chirro,Neutral,👋 Casual,"goodbye, farewell",,0.0,Red,,,,,
+8,2026-09-25 13:54,Recipient,Ben,"Hi Kuya Ben, let go na kay may iya na crush HAHAHAHA",Anonymous,Mixed,😂 Humorous,"graduation, crush",The message implies a suggestion that the school should have provided a more suitable environment for students to develop relationships.,0.0,Pink,,,,,
