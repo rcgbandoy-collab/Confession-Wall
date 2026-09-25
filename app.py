@@ -9,20 +9,18 @@ and an insights dashboard summarizes everything for the school.
 
 UI: paper-note wall, free-text recipient, note-color picker, floating
 purple iOS-style AI chat MODAL (not a sidebar) with a blurred backdrop.
-The chat now reasons over STRUCTURED note records (author/message/color/
-timestamp/id) instead of one text blob, so "latest" questions are answered
-from real timestamps and authors are never confused with each other.
 
 NOTE: the modal/backdrop trick below relies on Streamlit's
 `st.container(key=...)` feature (Streamlit 1.31+), which puts a stable
 CSS class (`st-key-<key>`) on the container so we can position it with
-`position: fixed`. If you're on an older Streamlit, upgrade it.
+`position: fixed`. If you're on an older Streamlit, upgrade it
+(`pip install -U streamlit`) or the chat will fall back to plain inline
+layout instead of a floating modal.
 """
 
 import html
 import json
 import os
-import re
 from datetime import datetime
 
 import pandas as pd
@@ -60,12 +58,6 @@ COLOR_NAMES = list(NOTE_COLORS.keys())
 # Older rows with no saved color cycle through the light colors only
 FALLBACK_COLORS = [c for c in COLOR_NAMES if c not in ("Black", "Brown")]
 TILTS = [-2.0, 1.5, -1.0, 2.0, -1.5, 1.0]
-
-TEMPORAL_KEYWORDS = [
-    "latest", "newest", "most recent", "just posted", "just now",
-    "last note", "last message", "last post", "recently posted",
-    "who posted last", "who posted most recently", "newest post",
-]
 
 # Any instruct-tuned chat model available on HF Inference Providers works.
 # This one is free-tier friendly and good at following JSON instructions.
@@ -124,149 +116,39 @@ these exact keys:
         }
 
 
-# --------------------------------------------------------------------------
-# CHATBOT: structured record formatting + temporal ("latest") grounding
-# --------------------------------------------------------------------------
-def _sorted_by_time(df: pd.DataFrame, ascending: bool = False) -> pd.DataFrame:
-    d = df.copy()
-    d["_dt"] = pd.to_datetime(d["timestamp"], errors="coerce")
-    return d.sort_values("_dt", ascending=ascending)
-
-
-def _format_notes_block(df: pd.DataFrame, limit: int = 60) -> str:
-    """Each note as its OWN structured record — never a merged text blob, so
-    the AI can't confuse one author's words/color/date with another's."""
-    d = _sorted_by_time(df, ascending=False).head(limit)
-    blocks = []
-    for _, r in d.iterrows():
-        posted = r["_dt"].strftime("%Y-%m-%d %I:%M %p") if pd.notna(r["_dt"]) else str(r.get("timestamp", ""))
-        blocks.append(
-            f'NOTE #{r.get("id", "?")}\n'
-            f'Author: {r.get("sender_name") or "Anonymous"}\n'
-            f'Recipient: {r.get("target_name", "")}\n'
-            f'Color: {r.get("note_color") or "White"}\n'
-            f'Posted: {posted}\n'
-            f'Message: "{r.get("message", "")}"'
-        )
-    return "\n\n".join(blocks)
-
-
-def _wants_latest(question: str) -> bool:
-    q = question.lower()
-    return any(k in q for k in TEMPORAL_KEYWORDS)
-
-
-def _latest_note_ground_truth(df: pd.DataFrame) -> str:
-    """Computed in Python (not guessed by the LLM) so 'latest' questions are
-    always answered from the real timestamp, never retrieval order."""
-    d = _sorted_by_time(df, ascending=False)
-    if d.empty:
-        return "GROUND TRUTH: there are no notes on the wall yet."
-    r = d.iloc[0]
-    posted = r["_dt"].strftime("%Y-%m-%d %I:%M %p") if pd.notna(r["_dt"]) else str(r.get("timestamp", ""))
-    return (
-        f'GROUND TRUTH (computed by timestamp, trust this over anything else): the most '
-        f'recently posted note right now is NOTE #{r.get("id", "?")}, by '
-        f'{r.get("sender_name") or "Anonymous"}, posted {posted}, addressed to '
-        f'"{r.get("target_name", "")}": "{r.get("message", "")}"'
-    )
-
-
 def chatbot_answer(question: str, df: pd.DataFrame, history: list | None = None) -> str:
-    """A friendly assistant that reasons over the wall's STRUCTURED notes
-    (author + message + color + timestamp + id kept together per note) and
-    can also chat about anything else using its own knowledge."""
-    notes_block = _format_notes_block(df)[:6000]
-    latest_hint = _latest_note_ground_truth(df) if _wants_latest(question) else ""
+    """A friendly general-purpose assistant that also knows about this wall's messages."""
+    sample = df[["target_type", "target_name", "message", "sender_name", "sentiment"]].to_dict(orient="records")
     convo = ""
     if history:
-        for turn in history[-6:]:
+        for turn in history[-6:]:  # keep last few turns for context
             role = "Student" if turn["role"] == "user" else "You"
             convo += f"{role}: {turn['content']}\n"
-
     prompt = f"""
-You are a precise, friendly assistant embedded in a school "Confession Wall" app.
-You are ONLY the assistant — never a student, never a wall author, never a wall
-recipient. You can chat about anything using your own knowledge, but for
-questions about the wall you MUST rely only on the structured notes below.
+You are a warm, friendly, knowledgeable chat assistant living inside a "Confession Wall"
+app, where graduating students post farewell messages. You can chat about ANYTHING the
+student asks — general knowledge, casual conversation, advice — using your own knowledge,
+AND you also have access to EVERY message currently posted on this wall, shown below
+(this list always reflects the latest state of the wall, updated every time someone posts
+a new message). Use the wall's data whenever the question is about it; otherwise just
+answer naturally like a smart, personable human would.
 
-HARD ANTI-HALLUCINATION RULES — these override everything else:
-- Every name you use MUST come from an "Author:" or "Recipient:" field in the
-  NOTES block below, or from something the Student themselves typed in this
-  chat. NEVER introduce, invent, or mention any other name. If no notes are
-  relevant to the question, say plainly that there's nothing about that on the
-  wall — do not make up a person to talk about instead.
-- "Author" = who WROTE that note. "Recipient" = who that note is ADDRESSED TO.
-  These are different people. Never say a Recipient "said" or "wrote" or
-  "asked" something — only an Author can be quoted or described as saying
-  something, and only for their own note.
-- Never address the Student as if they were a wall Author or Recipient, and
-  never claim the Student asked something they did not actually type. Quote
-  the Student's own words only when they actually said them.
-- If you're unsure who wrote or is referenced in a note, say so plainly
-  instead of guessing — accuracy matters more than sounding confident.
-
-OTHER RULES:
-- Every note below is its OWN separate record. Never merge two notes together,
-  and never attribute one author's words to a different author.
-- For questions about "latest / newest / most recent / last / just posted",
-  use ONLY the actual "Posted" timestamps (or the GROUND TRUTH line below if
-  present) — never guess from which note appears first, similarity, or order.
-- When discussing a specific note, name its actual Author from the record
-  (never a placeholder or invented name, and never "the person"/"someone").
-- Answer directly. Do NOT start with filler like "I understand...", "That's a
-  straightforward message, isn't it?", or "Let me analyze this...".
-- Keep the explanation proportional to the message — don't overanalyze a
-  simple "hi", and give real detail for a message that has more to it.
-- If asked about someone's texting/writing style, base it only on patterns you
-  can actually see across THEIR OWN messages below — don't invent traits.
-- Wrap the key point, names, or dates worth emphasizing in **double
-  asterisks** — sparingly, not every word.
-- Stay on the note/author the student is currently asking about; switch only
-  when they clearly change topic.
-- Give exactly ONE answer in your own voice as the assistant. Never write it
-  as a back-and-forth or quote a conversation that didn't happen.
-
-{latest_hint}
-
-ALL NOTES CURRENTLY ON THE WALL (newest first). If this list is empty, there
-is nothing posted yet — say so instead of inventing a note:
-{notes_block if notes_block.strip() else "(no notes have been posted yet)"}
+All messages currently on the wall (as JSON records):
+{json.dumps(sample)[:6000]}
 
 Conversation so far:
 {convo}
 Student: {question}
 
-Reply in 2-4 sentences unless the question clearly needs more.
+Reply naturally and conversationally, like a helpful human would in a chat — keep it
+brief (2-4 sentences) unless more detail is clearly needed. If you're not fully sure
+about a fast-changing real-world fact (like a current officeholder or recent news),
+say so honestly instead of guessing.
 """
     try:
-        return _chat(prompt, temperature=0.2)
+        return _chat(prompt, temperature=0.5)
     except Exception as e:
         return f"Sorry, I couldn't process that: {e}"
-
-
-def _guess_note_accent(answer: str, df: pd.DataFrame):
-    """If the AI's reply names one author, tint that AI bubble with that
-    author's most recent note color (subtle, per-message — not the whole
-    chatbot theme, which stays purple by default)."""
-    names = [n for n in df["sender_name"].dropna().unique() if n and n.lower() != "anonymous"]
-    names.sort(key=len, reverse=True)  # longer names first avoids partial-name collisions
-    low = answer.lower()
-    for name in names:
-        if re.search(r"\b" + re.escape(name.lower()) + r"\b", low):
-            sub = _sorted_by_time(df[df["sender_name"] == name], ascending=False)
-            if sub.empty:
-                continue
-            color = sub.iloc[0].get("note_color", "")
-            if color in NOTE_COLORS:
-                return NOTE_COLORS[color][2]  # the more saturated "tape" hex
-    return None
-
-
-def _bold(escaped_text: str) -> str:
-    """Turn **bold** markers (from the AI's own reply) into <strong> tags.
-    Safe to run AFTER html.escape — no raw user HTML can reach this point."""
-    return re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", escaped_text)
 
 
 # --------------------------------------------------------------------------
@@ -327,22 +209,52 @@ st.markdown("""
            letter-spacing: 1px; text-transform: uppercase; color: var(--sub); }
 .note-msg { font-family: 'Caveat', cursive; font-size: 25px; line-height: 28px; color: var(--ink); margin: 14px 0; }
 .note-tag { display: inline-block; background: rgba(128,128,128,.22); color: var(--ink);
-            padding: 3px 12px; border-radius: 999px; font-size: 12px; font-family: 'Quicksand', sans-serif; }
+            padding: 3px 12px; border-radius: 999px; font-size: 12px; font-family: 'Quicksand', sans-serif;
+            margin-top: 10px; }
 .note-from { font-family: 'Caveat', cursive; font-size: 21px; color: var(--sub); margin-top: 10px; }
 .note-date { font-family: 'Quicksand', sans-serif; font-size: 11px; color: var(--sub); margin-top: 4px; }
 
 .single { max-width: 420px; margin: 24px auto; }
 
-/* ---------- Floating purple AI chat ----------
-   NOTE: positioning is done in JS (see below), not CSS-only, because
-   Streamlit's container "key" CSS classes are only stable on newer
-   versions. These rules only cover things that DON'T depend on that. */
+/* ---------- Floating purple AI chat: trigger button ---------- */
+/* Position/size/drag is now fully controlled by _CHAT_HEAD_JS (inline styles),
+   so no CSS positioning rules here — avoids fighting with the JS-driven drag. */
+
+/* ---------- Full-screen dim + blur backdrop (the whole site sits behind this) ---------- */
+.st-key-chat_overlay {
+    position: fixed !important; inset: 0 !important; z-index: 9998 !important;
+    background: rgba(20, 10, 30, .45) !important;
+    backdrop-filter: blur(6px) !important; -webkit-backdrop-filter: blur(6px) !important;
+    display: flex !important; align-items: center !important; justify-content: center !important;
+    padding: 20px !important;
+}
+
+/* ---------- The chat modal: NO white box — just the blurred backdrop, messages float on it ---------- */
+.st-key-chat_modal {
+    background: transparent !important; border-radius: 0 !important;
+    width: 460px !important; max-width: 92vw !important; max-height: 82vh !important;
+    box-shadow: none !important;
+    display: flex !important; flex-direction: column !important; overflow: hidden !important;
+    animation: cwOpen .18s ease-out;
+}
 @keyframes cwOpen {
     from { opacity: 0; transform: translateY(10px) scale(.97); }
     to   { opacity: 1; transform: translateY(0) scale(1); }
 }
-.cw-header-title { font-family: 'Quicksand', sans-serif; font-weight: 700; font-size: 15px; color: #fff; padding-top: 10px; }
-.cw-header-sub { font-family: 'Quicksand', sans-serif; font-size: 12px; color: rgba(255,255,255,.85); margin-top: 2px; padding-bottom: 10px; }
+
+.st-key-chat_header {
+    background: transparent !important;
+    padding: 6px 4px 6px 18px !important;
+}
+.st-key-chat_header button {
+    background: rgba(0,0,0,.25) !important; border: none !important; box-shadow: none !important;
+    color: #fff !important; font-size: 16px !important; width: 34px !important; height: 34px !important;
+    margin-top: 2px !important; border-radius: 50% !important;
+}
+.cw-header-title { font-family: 'Quicksand', sans-serif; font-weight: 700; font-size: 15px; color: #fff; padding-top: 10px;
+                    text-shadow: 0 1px 4px rgba(0,0,0,.5); }
+.cw-header-sub { font-family: 'Quicksand', sans-serif; font-size: 12px; color: rgba(255,255,255,.85); margin-top: 2px; padding-bottom: 10px;
+                 text-shadow: 0 1px 4px rgba(0,0,0,.5); }
 
 .cw-body { padding: 12px 14px 4px; max-height: 46vh; overflow-y: auto; scroll-behavior: smooth; }
 .cw-row { display: flex; margin: 7px 0; animation: cwIn .2s ease; }
@@ -350,21 +262,22 @@ st.markdown("""
 .cw-row.user { justify-content: flex-end; }
 @keyframes cwIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
 
-.cw-label { font-family: 'Quicksand', sans-serif; font-size: 10px; color: #999; margin: 0 4px 2px; text-align: right; }
+.cw-label { font-family: 'Quicksand', sans-serif; font-size: 10px; color: rgba(255,255,255,.8); margin: 0 4px 2px; text-align: right; }
 .cw-row.ai .cw-label { text-align: left; }
 
 .cw-bubble {
     max-width: 78%; padding: 9px 14px; border-radius: 16px;
     font-family: 'Quicksand', sans-serif; font-size: 14px; line-height: 1.4;
-    box-shadow: 0 1px 2px rgba(0,0,0,.08);
+    box-shadow: 0 2px 6px rgba(0,0,0,.25);
 }
-.cw-bubble.ai { background: #7c3aed; color: #fff; border-bottom-left-radius: 4px; }
-.cw-bubble.user { background: #f1f0f5; color: #222; border-bottom-right-radius: 4px; }
-.cw-bubble strong { text-decoration: underline; text-underline-offset: 2px; }
+/* Default AI bubble = grey. When the AI mentions a note's author, its accent
+   color (from that note) is applied inline, overriding this grey. */
+.cw-bubble.ai { background: rgba(120,120,132,.92); color: #fff; border-bottom-left-radius: 4px; }
+.cw-bubble.user { background: #2563eb; color: #fff; border-bottom-right-radius: 4px; }
 
 .cw-typing {
     display: inline-flex; gap: 4px; padding: 12px 14px;
-    background: #7c3aed; border-radius: 16px; border-bottom-left-radius: 4px;
+    background: rgba(120,120,132,.92); border-radius: 16px; border-bottom-left-radius: 4px;
 }
 .cw-typing span {
     width: 6px; height: 6px; border-radius: 50%; background: #fff;
@@ -374,8 +287,155 @@ st.markdown("""
 .cw-typing span:nth-child(3) { animation-delay: .4s; }
 @keyframes cwBlink { 0%, 80%, 100% { opacity: .3; } 40% { opacity: 1; } }
 
+.st-key-chat_inputbar { border-top: none !important; padding: 10px 12px !important; background: transparent !important; }
+.st-key-chat_inputbar input {
+    border-radius: 999px !important; border: none !important;
+    padding: 8px 14px !important; font-family: 'Quicksand', sans-serif !important;
+    background: rgba(255,255,255,.92) !important; color: #111 !important;
+}
+.st-key-chat_inputbar button[kind="formSubmit"], .st-key-chat_inputbar button {
+    background: #2563eb !important; color: #fff !important; border: none !important;
+    border-radius: 50% !important; width: 36px !important; height: 36px !important;
+    padding: 0 !important;
+}
 </style>
 """, unsafe_allow_html=True)
+
+
+# --------------------------------------------------------------------------
+# Draggable floating chat head — real-time follows the cursor while held,
+# still a normal click when not dragged. Pure UI behavior; does not touch
+# any AI/analysis logic above.
+# --------------------------------------------------------------------------
+_CHAT_HEAD_JS = r"""
+(function () {
+    var win = window.parent;
+    var doc = win.document;
+    var SIZE = 56;
+
+    function findButtonByText(text) {
+        var btns = doc.querySelectorAll('[data-testid="stButton"] button');
+        for (var i = 0; i < btns.length; i++) {
+            if (btns[i].textContent.trim() === text) return btns[i];
+        }
+        return null;
+    }
+
+    function place(wrap, left, top) {
+        var maxL = win.innerWidth - SIZE - 4;
+        var maxT = win.innerHeight - SIZE - 4;
+        wrap.style.left = Math.max(4, Math.min(left, maxL)) + 'px';
+        wrap.style.top = Math.max(4, Math.min(top, maxT)) + 'px';
+        wrap.style.right = 'auto';
+        wrap.style.bottom = 'auto';
+    }
+
+    // Global listeners: bound only once, even though this script re-runs on every rerun
+    function bindOnce() {
+        if (win.__cwHeadBound) return;
+        win.__cwHeadBound = true;
+
+        doc.addEventListener('pointermove', function (e) {
+            var s = win.__cwHeadState;
+            if (!s || !s.down) return;
+            var dx = e.clientX - s.x0, dy = e.clientY - s.y0;
+            if (!s.moved && Math.abs(dx) + Math.abs(dy) > 4) s.moved = true;
+            if (!s.moved) return;
+            s.nextL = s.left0 + dx;
+            s.nextT = s.top0 + dy;
+            if (!s.raf) {
+                s.raf = win.requestAnimationFrame(function () {
+                    s.raf = null;
+                    place(s.wrap, s.nextL, s.nextT);
+                });
+            }
+        });
+
+        doc.addEventListener('pointerup', function () {
+            var s = win.__cwHeadState;
+            if (!s || !s.down) return;
+            s.down = false;
+            clearTimeout(s.timer);
+            s.wrap.style.transform = '';
+            if (s.moved) {
+                s.swallow = true;  // don't let this drop count as a click
+                setTimeout(function () { s.swallow = false; }, 400);
+                var r = s.wrap.getBoundingClientRect();
+                try {
+                    win.sessionStorage.setItem('cwHeadPos', JSON.stringify({ left: r.left, top: r.top }));
+                } catch (err) {}
+            }
+        });
+
+        // Capture-phase click filter: swallows the click only right after a drag
+        doc.addEventListener('click', function (e) {
+            var s = win.__cwHeadState;
+            if (s && s.swallow) {
+                s.swallow = false;
+                e.stopPropagation();
+                e.preventDefault();
+            }
+        }, true);
+    }
+
+    function onDown(e) {
+        if (e.pointerType === 'mouse' && e.button !== 0) return;
+        var wrap = e.currentTarget;
+        var r = wrap.getBoundingClientRect();
+        var s = {
+            wrap: wrap, down: true, moved: false, swallow: false,
+            x0: e.clientX, y0: e.clientY, left0: r.left, top0: r.top,
+            timer: null, raf: null
+        };
+        // Long press (~180ms) = "lift" visual, so the user knows it's grabbed
+        s.timer = setTimeout(function () {
+            wrap.style.transform = 'scale(1.1)';
+        }, 180);
+        win.__cwHeadState = s;
+    }
+
+    function styleFloatingHead() {
+        bindOnce();
+        var btn = findButtonByText('\ud83d\udcac');  // 💬
+        if (!btn) return;
+        var wrap = btn.closest('[data-testid="stButton"]');
+        if (!wrap || wrap.dataset.cwStyled) return;
+        wrap.dataset.cwStyled = '1';
+
+        wrap.style.position = 'fixed';
+        wrap.style.zIndex = '999997';
+        wrap.style.touchAction = 'none';
+        wrap.style.transition = 'transform .15s ease';
+
+        btn.style.background = 'linear-gradient(135deg, #7c3aed, #9333ea)';
+        btn.style.color = '#fff';
+        btn.style.border = 'none';
+        btn.style.borderRadius = '50%';
+        btn.style.width = SIZE + 'px';
+        btn.style.height = SIZE + 'px';
+        btn.style.padding = '0';
+        btn.style.fontSize = '24px';
+        btn.style.boxShadow = '0 6px 18px rgba(124,58,237,.5)';
+        btn.style.cursor = 'grab';
+        btn.style.touchAction = 'none';
+
+        // Restore last position (survives reruns and open/close)
+        var saved = null;
+        try { saved = JSON.parse(win.sessionStorage.getItem('cwHeadPos')); } catch (e) {}
+        if (saved && typeof saved.left === 'number') {
+            place(wrap, saved.left, saved.top);
+        } else {
+            place(wrap, win.innerWidth - SIZE - 24, win.innerHeight - SIZE - 24);
+        }
+
+        wrap.addEventListener('pointerdown', onDown);
+    }
+
+    styleFloatingHead();
+    setTimeout(styleFloatingHead, 200);
+    setTimeout(styleFloatingHead, 600);
+})();
+"""
 
 
 def _clean(v) -> str:
@@ -407,9 +467,9 @@ def _note_html(row) -> str:
         f'<div class="note" style="background-color:{paper};--tape:{tape};--ink:{ink};--sub:{sub};--tilt:{tilt}deg;">'
         f'<div class="note-to">To: {_clean(row["target_name"])}</div>'
         f'<div class="note-msg">{msg}</div>'
-        f'{tag_html}'
         f'<div class="note-from">— {_clean(row["sender_name"])}</div>'
         f'<div class="note-date">{date}</div>'
+        f'{tag_html}'
         f'</div>'
     )
 
@@ -425,6 +485,22 @@ def render_wall(df: pd.DataFrame):
     st.markdown(f'<div class="wall">{notes}</div>', unsafe_allow_html=True)
 
 
+def _guess_note_accent(answer: str, df: pd.DataFrame):
+    """If the AI's reply mentions a sender/author from the wall, return that
+    note's accent color (hex) so the AI chat bubble can match it. Returns
+    None if no author is mentioned (bubble stays default grey)."""
+    lower_answer = answer.lower()
+    for _, row in df.iterrows():
+        sender = str(row.get("sender_name", "")).strip()
+        if not sender or sender.lower() == "anonymous":
+            continue
+        if sender.lower() in lower_answer:
+            color = row.get("note_color", "")
+            if color in NOTE_COLORS:
+                return NOTE_COLORS[color][2]  # the vivid "tape" color as accent
+    return None
+
+
 # --------------------------------------------------------------------------
 # APP LAYOUT
 # --------------------------------------------------------------------------
@@ -432,12 +508,6 @@ st.title("🎓 Confession Wall")
 st.caption("Say what's on your mind about teachers, rooms, staff, or fellow students.")
 
 # ---- Floating purple AI chat: MODAL + full-screen blurred backdrop ----
-# NOTE: instead of relying on Streamlit's container "key" CSS classes
-# (only stable on newer Streamlit versions, and were silently failing —
-# that's why the button was invisible before), everything below is
-# positioned with plain JavaScript that locates elements by their stable
-# data-testid attributes / marker <div id> anchors. This works on old and
-# new Streamlit alike.
 if "chat_open" not in st.session_state:
     st.session_state.chat_open = False
 if "chat_history" not in st.session_state:
@@ -445,187 +515,20 @@ if "chat_history" not in st.session_state:
 if "chat_pending" not in st.session_state:
     st.session_state.chat_pending = None
 
-_CHAT_HEAD_JS = r"""
-(function () {
-    var doc = window.parent.document;
-    function findButtonByText(text) {
-        var btns = doc.querySelectorAll('[data-testid="stButton"] button');
-        for (var i = 0; i < btns.length; i++) {
-            if (btns[i].textContent.trim() === text) return btns[i];
-        }
-        return null;
-    }
-    function styleFloatingHead() {
-        var btn = findButtonByText('\ud83d\udcac');  // 💬 speech bubble
-        if (!btn) return;
-        var wrap = btn.closest('[data-testid="stButton"]');
-        if (!wrap || wrap.dataset.cwStyled) return;
-        wrap.dataset.cwStyled = '1';
-        wrap.style.position = 'fixed';
-        wrap.style.bottom = '24px';
-        wrap.style.right = '24px';
-        wrap.style.zIndex = '999997';
-        wrap.style.touchAction = 'none';
-        btn.style.background = 'linear-gradient(135deg, #7c3aed, #9333ea)';
-        btn.style.color = '#fff';
-        btn.style.border = 'none';
-        btn.style.borderRadius = '50%';
-        btn.style.width = '56px';
-        btn.style.height = '56px';
-        btn.style.padding = '0';
-        btn.style.fontSize = '24px';
-        btn.style.boxShadow = '0 6px 18px rgba(124,58,237,.5)';
-        btn.style.cursor = 'grab';
-        // make it a draggable "chat head" like Messenger's bubble
-        var dragging = false, moved = false, startX = 0, startY = 0;
-        function down(x, y) {
-            dragging = true; moved = false; startX = x; startY = y;
-            var r = wrap.getBoundingClientRect();
-            wrap.style.left = r.left + 'px'; wrap.style.top = r.top + 'px';
-            wrap.style.right = 'auto'; wrap.style.bottom = 'auto';
-        }
-        function move(x, y) {
-            if (!dragging) return;
-            var dx = x - startX, dy = y - startY;
-            if (Math.abs(dx) > 5 || Math.abs(dy) > 5) moved = true;
-            if (!moved) return;
-            var r = wrap.getBoundingClientRect();
-            var nl = Math.max(4, Math.min(r.left + dx, window.innerWidth - r.width - 4));
-            var nt = Math.max(4, Math.min(r.top + dy, window.innerHeight - r.height - 4));
-            wrap.style.left = nl + 'px'; wrap.style.top = nt + 'px';
-            startX = x; startY = y;
-        }
-        function up() {
-            if (moved) {
-                var swallow = function (ev) { ev.stopPropagation(); ev.preventDefault(); btn.removeEventListener('click', swallow, true); };
-                btn.addEventListener('click', swallow, true);
-            }
-            dragging = false;
-        }
-        wrap.addEventListener('mousedown', function (e) { down(e.clientX, e.clientY); });
-        doc.addEventListener('mousemove', function (e) { move(e.clientX, e.clientY); });
-        doc.addEventListener('mouseup', up);
-        wrap.addEventListener('touchstart', function (e) { var t = e.touches[0]; down(t.clientX, t.clientY); }, { passive: true });
-        doc.addEventListener('touchmove', function (e) { var t = e.touches[0]; move(t.clientX, t.clientY); }, { passive: true });
-        doc.addEventListener('touchend', up);
-    }
-    styleFloatingHead();
-    setTimeout(styleFloatingHead, 200);
-    setTimeout(styleFloatingHead, 600);
-})();
-"""
-
-_CHAT_MODAL_JS = r"""
-(function () {
-    var doc = window.parent.document;
-    function blockFor(id) {
-        var a = doc.getElementById(id);
-        return a ? a.closest('[data-testid="stVerticalBlock"]') : null;
-    }
-    function findButtonByText(root, text) {
-        if (!root) return null;
-        var btns = root.querySelectorAll('button');
-        for (var i = 0; i < btns.length; i++) {
-            if (btns[i].textContent.trim() === text) return btns[i];
-        }
-        return null;
-    }
-    function styleModal() {
-        var overlay = blockFor('cw-overlay-anchor');
-        var modal = blockFor('cw-modal-anchor');
-        var header = blockFor('cw-header-anchor');
-        var inputbar = blockFor('cw-inputbar-anchor');
-        if (!overlay || !modal || overlay.dataset.cwStyled) return;
-        overlay.dataset.cwStyled = '1';
-
-        overlay.style.position = 'fixed';
-        overlay.style.inset = '0';
-        overlay.style.zIndex = '999998';
-        overlay.style.background = 'rgba(20,10,30,.45)';
-        overlay.style.backdropFilter = 'blur(6px)';
-        overlay.style.webkitBackdropFilter = 'blur(6px)';
-        overlay.style.display = 'flex';
-        overlay.style.alignItems = 'center';
-        overlay.style.justifyContent = 'center';
-        overlay.style.padding = '20px';
-
-        modal.style.background = '#fff';
-        modal.style.borderRadius = '20px';
-        modal.style.width = '380px';
-        modal.style.maxWidth = '92vw';
-        modal.style.maxHeight = '82vh';
-        modal.style.boxShadow = '0 25px 60px rgba(0,0,0,.45)';
-        modal.style.display = 'flex';
-        modal.style.flexDirection = 'column';
-        modal.style.overflow = 'hidden';
-        modal.style.animation = 'cwOpen .18s ease-out';
-
-        if (header) {
-            header.style.background = 'linear-gradient(135deg, #7c3aed, #9333ea)';
-            header.style.padding = '6px 4px 6px 18px';
-            var newBtn = findButtonByText(header, '\ud83d\uddd1\ufe0f');
-            var closeBtn = findButtonByText(header, '\u2715');
-            [newBtn, closeBtn].forEach(function (b) {
-                if (!b) return;
-                b.style.background = 'transparent';
-                b.style.border = 'none';
-                b.style.boxShadow = 'none';
-                b.style.color = '#fff';
-                b.style.fontSize = '15px';
-                b.style.width = '30px';
-                b.style.height = '30px';
-                b.style.marginTop = '2px';
-            });
-        }
-
-        if (inputbar) {
-            inputbar.style.borderTop = '1px solid #eee';
-            inputbar.style.padding = '10px 12px';
-            inputbar.style.background = '#fff';
-            var inp = inputbar.querySelector('input[type="text"]');
-            if (inp) {
-                inp.style.borderRadius = '999px';
-                inp.style.border = '1px solid #ddd';
-                inp.style.padding = '8px 14px';
-            }
-            var sendBtn = findButtonByText(inputbar, '\u27a4');
-            if (sendBtn) {
-                sendBtn.style.background = '#7c3aed';
-                sendBtn.style.color = '#fff';
-                sendBtn.style.border = 'none';
-                sendBtn.style.borderRadius = '50%';
-                sendBtn.style.width = '36px';
-                sendBtn.style.height = '36px';
-                sendBtn.style.padding = '0';
-            }
-        }
-    }
-    function autoScroll() {
-        var d = doc.getElementById('cw-body');
-        if (d) d.scrollTop = d.scrollHeight;
-    }
-    styleModal(); autoScroll();
-    setTimeout(function () { styleModal(); autoScroll(); }, 150);
-    setTimeout(function () { styleModal(); autoScroll(); }, 400);
-})();
-"""
-
 if not st.session_state.chat_open:
-    # CLOSED: only the small floating purple "chat head" is visible (bottom-right, draggable).
-    if st.button("💬", key="chat_toggle"):
-        st.session_state.chat_open = True
-        st.rerun()
+    # CLOSED: only the small floating purple icon is visible.
+    with st.container(key="chat_toggle_btn"):
+        if st.button("💬", key="chat_toggle"):
+            st.session_state.chat_open = True
+            st.rerun()
+    # Make that button draggable (long-press + drag = move; plain click = open).
     components.html(f"<script>{_CHAT_HEAD_JS}</script>", height=0)
 else:
     # OPEN: full-screen blurred/dimmed backdrop with a sharp floating card on top.
-    with st.container():
-        st.markdown('<div id="cw-overlay-anchor"></div>', unsafe_allow_html=True)
-        with st.container():
-            st.markdown('<div id="cw-modal-anchor"></div>', unsafe_allow_html=True)
-
-            with st.container():
-                st.markdown('<div id="cw-header-anchor"></div>', unsafe_allow_html=True)
-                hcol1, hcol2, hcol3 = st.columns([5, 1, 1])
+    with st.container(key="chat_overlay"):
+        with st.container(key="chat_modal"):
+            with st.container(key="chat_header"):
+                hcol1, hcol2 = st.columns([6, 1])
                 with hcol1:
                     st.markdown(
                         '<div class="cw-header-title">AI Assistant</div>'
@@ -633,35 +536,29 @@ else:
                         unsafe_allow_html=True,
                     )
                 with hcol2:
-                    if st.button("🗑️", key="chat_new", help="New chat (clears this conversation only — wall posts stay)"):
-                        st.session_state.chat_history = []
-                        st.session_state.chat_pending = None
-                        st.rerun()
-                with hcol3:
                     if st.button("✕", key="chat_close"):
                         st.session_state.chat_open = False
                         st.rerun()
 
             # message area (clean initial state — no pre-filled/leftover content)
-            _wall_df = load_data()
             body_html = '<div class="cw-body" id="cw-body">'
             if not st.session_state.chat_history:
                 body_html += (
                     '<div class="cw-row ai"><div>'
                     '<div class="cw-label">AI</div>'
-                    '<div class="cw-bubble ai">Ask anything about the messages posted here.</div>'
+                    '<div class="cw-bubble ai">Ask me anything — about the wall, or anything else!</div>'
                     '</div></div>'
                 )
             for turn in st.session_state.chat_history:
                 is_ai = turn["role"] != "user"
                 side = "ai" if is_ai else "user"
                 label = "AI" if is_ai else "You"
-                content = _bold(html.escape(turn["content"])) if is_ai else html.escape(turn["content"])
-                style = f' style="background:{turn["accent"]};"' if is_ai and turn.get("accent") else ""
+                accent = turn.get("accent") if is_ai else None
+                style_attr = f' style="background:{accent};color:#1a1a1a;"' if accent else ""
                 body_html += (
                     f'<div class="cw-row {side}"><div>'
                     f'<div class="cw-label">{label}</div>'
-                    f'<div class="cw-bubble {side}"{style}>{content}</div>'
+                    f'<div class="cw-bubble {side}"{style_attr}>{html.escape(turn["content"])}</div>'
                     f'</div></div>'
                 )
             if st.session_state.chat_pending:
@@ -674,18 +571,34 @@ else:
             body_html += "</div>"
             st.markdown(body_html, unsafe_allow_html=True)
 
+            # auto-follow the latest message — no manual scrolling needed
+            components.html(
+                """
+                <script>
+                  var d = window.parent.document.getElementById('cw-body');
+                  if (d) { d.scrollTop = d.scrollHeight; }
+                </script>
+                """,
+                height=0,
+            )
+
             # if a question was just sent, generate the reply now (the dots
             # above show for this render), then rerun with the real answer.
+            # NOTE: we pass the FULL wall (load_data()), not a sentiment-filtered
+            # subset — otherwise the AI only "sees" messages that already went
+            # through GenAI analysis and misses everything else on the wall.
             if st.session_state.chat_pending:
                 question = st.session_state.chat_pending
-                answer = chatbot_answer(question, _wall_df, st.session_state.chat_history)
-                accent = _guess_note_accent(answer, _wall_df)
-                st.session_state.chat_history.append({"role": "assistant", "content": answer, "accent": accent})
+                _full_df = load_data()
+                answer = chatbot_answer(question, _full_df, st.session_state.chat_history)
+                accent = _guess_note_accent(answer, _full_df)
+                st.session_state.chat_history.append(
+                    {"role": "assistant", "content": answer, "accent": accent}
+                )
                 st.session_state.chat_pending = None
                 st.rerun()
 
-            with st.container():
-                st.markdown('<div id="cw-inputbar-anchor"></div>', unsafe_allow_html=True)
+            with st.container(key="chat_inputbar"):
                 with st.form("chat_form", clear_on_submit=True):
                     colA, colB = st.columns([5, 1])
                     with colA:
@@ -699,8 +612,6 @@ else:
                     st.session_state.chat_pending = user_q
                     st.rerun()
 
-    components.html(f"<script>{_CHAT_MODAL_JS}</script>", height=0)
-
 tab1, tab2, tab3 = st.tabs(["✏️ Leave a Message", "📝 Browse Wall", "📊 Insights"])
 
 # ---- TAB 1: Submit a message ----
@@ -713,12 +624,14 @@ with tab1:
         )
         message = st.text_area("Message", height=150, placeholder="Write what's on your mind...")
         sender_name = st.text_input("From (optional — leave blank to stay Anonymous)")
-        note_color = st.radio(
-            "Choose your note color",
-            COLOR_NAMES,
-            format_func=lambda n: f"{NOTE_COLORS[n][0]} {n}",
-            horizontal=True,
-        )
+        with st.expander("🎨 Add Color"):
+            note_color = st.radio(
+                "Choose your note color",
+                COLOR_NAMES,
+                format_func=lambda n: f"{NOTE_COLORS[n][0]} {n}",
+                horizontal=True,
+                label_visibility="collapsed",
+            )
         submitted = st.form_submit_button("Post to the Wall")
 
     if submitted:
@@ -808,4 +721,4 @@ with tab3:
             mime="text/csv",
         )
 
-        st.info("💬 Tap the chat icon (bottom-right, any tab) to ask questions about the wall.")
+        st.info("💬 Tap the chat icon (top-right, any tab) to ask questions about the wall.")
