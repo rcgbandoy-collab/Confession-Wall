@@ -129,40 +129,144 @@ these exact keys:
         }
 
 
+def _normalize_text(value) -> str:
+    """Lowercase text for simple, deterministic wall-search matching."""
+    return str(value or "").strip().lower()
+
+
+def _parse_question_intent(question: str) -> str:
+    """Lightweight routing so factual wall questions use deterministic retrieval."""
+    q = _normalize_text(question)
+    if any(x in q for x in ["latest", "most recent", "newest", "last note", "last confession"]):
+        return "latest"
+    if any(x in q for x in ["who posted", "who wrote", "who made", "who sent"]):
+        return "author_lookup"
+    if any(x in q for x in ["what did", "what does", "what was", "mean by", "meaning of"]):
+        return "note_meaning"
+    if any(x in q for x in ["how many", "count", "number of", "most common", "mostly talking", "talking about"]):
+        return "summary"
+    return "general"
+
+
+def _retrieve_wall_context(question: str, df: pd.DataFrame, limit: int = 12) -> tuple[str, dict]:
+    """Retrieve relevant wall records before asking the LLM to interpret them.
+
+    This is a lightweight RAG layer for the prototype: deterministic metadata/exact
+    matching first, then keyword overlap. It prevents old/irrelevant rows from
+    crowding the prompt and makes 'who posted the latest?' reliable.
+    """
+    if df.empty:
+        return "No wall messages are currently available.", {}
+
+    work = df.copy()
+    work["_id"] = pd.to_numeric(work["id"], errors="coerce").fillna(0)
+    work["_text"] = (
+        work["target_name"].fillna("").astype(str) + " " +
+        work["sender_name"].fillna("").astype(str) + " " +
+        work["message"].fillna("").astype(str) + " " +
+        work["keywords"].fillna("").astype(str)
+    ).str.lower()
+    work = work.sort_values("_id", ascending=False)
+
+    intent = _parse_question_intent(question)
+    q = _normalize_text(question)
+
+    # The highest ID is the newest posted row because save_message increments it.
+    if intent == "latest":
+        row = work.iloc[0]
+        context = json.dumps([{
+            "id": int(row["_id"]),
+            "posted_at": str(row.get("timestamp", "")),
+            "recipient": str(row.get("target_name", "")),
+            "author": str(row.get("sender_name", "Anonymous")),
+            "message": str(row.get("message", "")),
+            "note_color": str(row.get("note_color", "")),
+        }], ensure_ascii=False)
+        return context, {"intent": intent, "latest_id": int(row["_id"])}
+
+    # Exact author/recipient lookup when a name appears in the question.
+    tokens = [t for t in q.replace("?", " ").replace(",", " ").split() if len(t) >= 3]
+    author_hits = pd.Series(False, index=work.index)
+    for token in tokens:
+        author_hits |= work["sender_name"].str.lower().eq(token)
+        author_hits |= work["target_name"].str.lower().eq(token)
+
+    if author_hits.any():
+        selected = work[author_hits].head(limit)
+    else:
+        # Keyword-overlap retrieval for meaning/topic questions.
+        stop = {"what", "does", "did", "this", "that", "mean", "about", "the", "note",
+                "message", "say", "says", "posted", "post", "who", "is", "are", "was",
+                "and", "for", "with", "from", "tell", "me", "please", "can", "you"}
+        q_words = {w for w in tokens if w not in stop}
+        scored = []
+        for idx, row in work.iterrows():
+            text = _normalize_text(row["_text"])
+            score = sum(1 for word in q_words if word in text)
+            scored.append((score, row["_id"], idx))
+        scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
+        chosen_idx = [idx for score, _, idx in scored[:limit] if score > 0]
+        selected = work.loc[chosen_idx] if chosen_idx else work.head(limit)
+
+    records = []
+    for _, row in selected.iterrows():
+        records.append({
+            "id": int(row["_id"]),
+            "posted_at": str(row.get("timestamp", "")),
+            "recipient": str(row.get("target_name", "")),
+            "author": str(row.get("sender_name", "Anonymous")),
+            "message": str(row.get("message", "")),
+            "sentiment": str(row.get("sentiment", "")),
+            "emotion": str(row.get("emotion", "")),
+            "keywords": str(row.get("keywords", "")),
+            "note_color": str(row.get("note_color", "")),
+        })
+    return json.dumps(records, ensure_ascii=False), {"intent": intent, "selected_ids": [int(r["id"]) for r in records]}
+
+
 def chatbot_answer(question: str, df: pd.DataFrame, history: list | None = None) -> str:
-    """A friendly general-purpose assistant that also knows about this wall's messages."""
-    sample = df[["target_type", "target_name", "message", "sender_name", "sentiment"]].to_dict(orient="records")
+    """Answer wall questions using targeted retrieval + Hugging Face interpretation."""
+    wall_context, meta = _retrieve_wall_context(question, df, limit=12)
     convo = ""
     if history:
-        for turn in history[-6:]:  # keep last few turns for context
+        for turn in history[-6:]:
             role = "Student" if turn["role"] == "user" else "You"
             convo += f"{role}: {turn['content']}\n"
+
+    intent = meta.get("intent", "general")
     prompt = f"""
-You are a warm, friendly, knowledgeable chat assistant living inside a "Confession Wall"
-app, where graduating students post farewell messages. You can chat about ANYTHING the
-student asks — general knowledge, casual conversation, advice — using your own knowledge,
-AND you also have access to EVERY message currently posted on this wall, shown below
-(this list always reflects the latest state of the wall, updated every time someone posts
-a new message). Use the wall's data whenever the question is about it; otherwise just
-answer naturally like a smart, personable human would.
+You are the AI assistant inside a Confession Wall. Your job is to answer questions
+about the messages actually posted on the wall.
 
-All messages currently on the wall (as JSON records):
-{json.dumps(sample)[:6000]}
+IMPORTANT RULES:
+1. Use the RETRIEVED WALL RECORDS below as the source of truth for wall questions.
+2. Never invent a name, message, date, or event that is not present in the records.
+3. 'author' means the person who posted/wrote the note. 'recipient' means who/what it was addressed to.
+4. For 'latest/newest/most recent' questions, use the record with the highest id in the retrieved latest record.
+5. For 'what does this mean?' questions, explain the message directly in 1-2 short sentences.
+6. Do NOT start with filler such as 'I understand what you mean', 'That's a pretty straightforward message',
+   'Let me analyze', or similar commentary.
+7. Be specific. If the user asks who posted it, give the author. If they ask what someone meant, explain the message.
+8. If the records do not support the answer, say that the wall data does not contain enough information.
+9. Keep answers concise unless the user asks for detail.
 
-Conversation so far:
+Detected question type: {intent}
+
+RETRIEVED WALL RECORDS:
+{wall_context}
+
+RECENT CONVERSATION:
 {convo}
-Student: {question}
 
-Reply naturally and conversationally, like a helpful human would in a chat — keep it
-brief (2-4 sentences) unless more detail is clearly needed. If you're not fully sure
-about a fast-changing real-world fact (like a current officeholder or recent news),
-say so honestly instead of guessing.
+USER QUESTION:
+{question}
+
+Answer directly.
 """
     try:
-        return _chat(prompt, temperature=0.5)
+        return _chat(prompt, temperature=0.25)
     except Exception as e:
         return f"Sorry, I couldn't process that: {e}"
-
 
 def analyze_emotion(message: str) -> dict:
     """Confession Analyzer: interpret ONE confession's meaning + emotion.
@@ -347,6 +451,10 @@ st.markdown("""
     color: #fff !important; font-size: 16px !important; width: 34px !important; height: 34px !important;
     margin-top: 2px !important; border-radius: 50% !important;
 }
+.st-key-chat_header [data-testid="stButton"] button {
+    font-family: 'Quicksand', sans-serif !important; font-size: 11px !important;
+}
+
 .cw-header-title { font-family: 'Quicksand', sans-serif; font-weight: 700; font-size: 15px; color: #fff; padding-top: 10px;
                     text-shadow: 0 1px 4px rgba(0,0,0,.5); }
 .cw-header-sub { font-family: 'Quicksand', sans-serif; font-size: 12px; color: rgba(255,255,255,.85); margin-top: 2px; padding-bottom: 10px;
@@ -410,6 +518,20 @@ st.markdown("""
     padding: 8px !important; opacity: .85;
 }
 [class*="st-key-note_wrap_"] [data-testid="stButton"] button:hover { opacity: 1; }
+
+/* ---------- Entire paper note is clickable ---------- */
+[class*="st-key-note_wrap_"] { position: relative !important; }
+[class*="st-key-note_wrap_"] [data-testid="stButton"] {
+    position: absolute !important; inset: 0 !important; z-index: 20 !important;
+    margin: 0 !important; padding: 0 !important; height: 100% !important;
+}
+[class*="st-key-note_wrap_"] [data-testid="stButton"] button {
+    width: 100% !important; height: 100% !important; min-height: 100% !important;
+    opacity: 0 !important; background: transparent !important; color: transparent !important;
+    border: 0 !important; box-shadow: none !important; cursor: pointer !important;
+    border-radius: 12px !important;
+}
+[class*="st-key-note_wrap_"] .note { pointer-events: none !important; }
 
 /* ---------- Confession Analyzer modal: same blurred backdrop as the AI chat ---------- */
 .st-key-note_overlay {
@@ -596,6 +718,32 @@ _CHAT_HEAD_JS = r"""
 """
 
 
+# Outside-click dismissal for both modal overlays.
+_MODAL_DISMISS_JS = r"""
+(function () {
+    var win = window.parent;
+    var doc = win.document;
+    if (win.__cwModalDismissBound) return;
+    win.__cwModalDismissBound = true;
+
+    doc.addEventListener('pointerdown', function (e) {
+        function closeIfOutside(overlaySelector, modalSelector, closeSelector) {
+            var overlay = doc.querySelector(overlaySelector);
+            var modal = doc.querySelector(modalSelector);
+            if (!overlay || !modal) return;
+            if (modal.contains(e.target)) return;
+            if (!overlay.contains(e.target)) return;
+            var close = doc.querySelector(closeSelector);
+            if (close) close.click();
+        }
+
+        closeIfOutside('.st-key-chat_overlay', '.st-key-chat_modal', '.st-key-chat_close button');
+        closeIfOutside('.st-key-note_overlay', '.st-key-note_modal', '.st-key-note_close button');
+    }, true);
+})();
+"""
+
+
 def _clean(v) -> str:
     """NaN-safe, HTML-safe text."""
     if v is None or (not isinstance(v, str) and pd.isna(v)):
@@ -708,19 +856,34 @@ def render_note_modal():
             st.markdown('</div>', unsafe_allow_html=True)
 
 
-def _guess_note_accent(answer: str, df: pd.DataFrame):
-    """If the AI's reply mentions a sender/author from the wall, return that
-    note's accent color (hex) so the AI chat bubble can match it. Returns
-    None if no author is mentioned (bubble stays default grey)."""
-    lower_answer = answer.lower()
+def _guess_note_accent(answer: str, df: pd.DataFrame, question: str = ""):
+    """Pick an accent from the most relevant note mentioned by the answer/question."""
+    q = _normalize_text(question)
+    a = _normalize_text(answer)
+
+    # Prefer an exact named author/recipient appearing in the question.
+    candidates = []
     for _, row in df.iterrows():
-        sender = str(row.get("sender_name", "")).strip()
-        if not sender or sender.lower() == "anonymous":
-            continue
-        if sender.lower() in lower_answer:
-            color = row.get("note_color", "")
-            if color in NOTE_COLORS:
-                return NOTE_COLORS[color][2]  # the vivid "tape" color as accent
+        sender = _normalize_text(row.get("sender_name", ""))
+        target = _normalize_text(row.get("target_name", ""))
+        if sender and sender != "anonymous" and len(sender) >= 3 and sender in q:
+            candidates.append(row)
+        elif target and len(target) >= 3 and target in q:
+            candidates.append(row)
+
+    # Otherwise use names explicitly mentioned by the AI reply.
+    if not candidates:
+        for _, row in df.sort_values("id", ascending=False).iterrows():
+            sender = _normalize_text(row.get("sender_name", ""))
+            target = _normalize_text(row.get("target_name", ""))
+            if (sender and sender != "anonymous" and len(sender) >= 3 and sender in a) or (target and len(target) >= 3 and target in a):
+                candidates.append(row)
+                break
+
+    if candidates:
+        color = candidates[0].get("note_color", "")
+        if color in NOTE_COLORS:
+            return NOTE_COLORS[color][2]
     return None
 
 
@@ -742,6 +905,9 @@ if "note_modal_open" not in st.session_state:
 if "selected_note_id" not in st.session_state:
     st.session_state.selected_note_id = None
 
+# Bind modal outside-click behavior once.
+components.html(f"<script>{_MODAL_DISMISS_JS}</script>", height=0)
+
 # Only one overlay active at a time: opening the Confession Analyzer closes the chat.
 if st.session_state.note_modal_open:
     st.session_state.chat_open = False
@@ -759,7 +925,7 @@ else:
     with st.container(key="chat_overlay"):
         with st.container(key="chat_modal"):
             with st.container(key="chat_header"):
-                hcol1, hcol2 = st.columns([6, 1])
+                hcol1, hcol2, hcol3 = st.columns([5.5, 1.2, 1])
                 with hcol1:
                     st.markdown(
                         '<div class="cw-header-title">AI Assistant</div>'
@@ -767,6 +933,11 @@ else:
                         unsafe_allow_html=True,
                     )
                 with hcol2:
+                    if st.button("＋ New", key="chat_new_topic"):
+                        st.session_state.chat_history = []
+                        st.session_state.chat_pending = None
+                        st.rerun()
+                with hcol3:
                     if st.button("✕", key="chat_close"):
                         st.session_state.chat_open = False
                         st.rerun()
@@ -813,6 +984,14 @@ else:
                 height=0,
             )
 
+            if st.session_state.chat_history:
+                clear_col1, clear_col2 = st.columns([7, 1])
+                with clear_col2:
+                    if st.button("🗑", key="chat_clear_history", help="Delete this conversation"):
+                        st.session_state.chat_history = []
+                        st.session_state.chat_pending = None
+                        st.rerun()
+
             # if a question was just sent, generate the reply now (the dots
             # above show for this render), then rerun with the real answer.
             # NOTE: we pass the FULL wall (load_data()), not a sentiment-filtered
@@ -822,7 +1001,7 @@ else:
                 question = st.session_state.chat_pending
                 _full_df = load_data()
                 answer = chatbot_answer(question, _full_df, st.session_state.chat_history)
-                accent = _guess_note_accent(answer, _full_df)
+                accent = _guess_note_accent(answer, _full_df, question)
                 st.session_state.chat_history.append(
                     {"role": "assistant", "content": answer, "accent": accent}
                 )
@@ -919,7 +1098,7 @@ elif st.session_state.active_tab == TAB_OPTIONS[1]:
     if filtered.empty:
         st.info("No messages match your search yet.")
     else:
-        st.caption("Tap any note to see the AI's interpretation.")
+        st.caption("Tap anywhere on a note to open its AI meaning and emotion review.")
         rows = filtered.sort_values("id", ascending=False).to_dict(orient="records")
         n_cols = 3
         cols = st.columns(n_cols)
@@ -927,7 +1106,7 @@ elif st.session_state.active_tab == TAB_OPTIONS[1]:
             with cols[i % n_cols]:
                 with st.container(key=f"note_wrap_{note_row['id']}"):
                     st.markdown(_note_html(note_row), unsafe_allow_html=True)
-                    if st.button("open", key=f"view_note_{note_row['id']}"):
+                    if st.button("View note", key=f"view_note_{note_row['id']}"):
                         st.session_state.selected_note_id = note_row["id"]
                         st.session_state.note_modal_open = True
                         st.rerun()
