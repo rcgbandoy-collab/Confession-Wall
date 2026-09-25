@@ -173,13 +173,21 @@ def analyze_emotion(message: str) -> dict:
     """
     categories = ", ".join(EMOTION_CATEGORIES.keys())
     prompt = f"""
-You are reading one confession/farewell message posted on a "Confession Wall" app.
-Interpret ONLY what is reasonably supported by the text — do not invent events,
-relationships, names, or psychological diagnoses that weren't stated. If the
-message is ambiguous, use wording like "The message appears to express...".
-If the message is clearly neutral, use "Neutral" as the emotion.
+You are reading one short message posted on a farewell/message wall app. Messages
+range from deep, heartfelt notes to simple casual greetings — read each one for
+what it actually is, don't over-interpret. Interpret ONLY what is reasonably
+supported by the text — do not invent events, relationships, names, or
+psychological diagnoses that weren't stated. If the message is ambiguous, use
+wording like "The message appears to express...". If the message is clearly
+neutral or just a casual greeting, say so plainly and use "Neutral" as the emotion.
 
-Confession: "{message}"
+IMPORTANT: Never use the word "confession" in your response — just call it "this
+message" or "this note". Many messages here are simple, casual, or friendly
+(like "hello, ma'am!") and calling them a "confession" would be a mismatched,
+overly dramatic label. Match your tone to the message: casual message → casual,
+brief read; heartfelt message → warmer, more thoughtful read.
+
+Message: "{message}"
 
 Return ONLY a valid JSON object (no markdown, no extra text) with these exact keys:
 - "meaning": ONE to TWO short sentences on what the confession appears to express.
@@ -388,12 +396,18 @@ st.markdown("""
 }
 
 /* ---------- Clickable note cards on the wall ---------- */
-[class*="st-key-note_wrap_"] { position: relative; }
-[class*="st-key-note_wrap_"] [data-testid="stButton"] { margin-top: -14px; }
+/* The whole card is clickable: an invisible button is overlaid exactly on
+   top of the note (position:absolute, inset:0) so tapping anywhere on the
+   note opens it — no separate visible "View" button needed. */
+[class*="st-key-note_wrap_"] { position: relative; margin-bottom: 30px; }
+[class*="st-key-note_wrap_"] .note { margin-bottom: 0; cursor: pointer; }
+[class*="st-key-note_wrap_"] [data-testid="stButton"] {
+    position: absolute !important; inset: 0 !important; margin: 0 !important; z-index: 5 !important;
+}
 [class*="st-key-note_wrap_"] [data-testid="stButton"] button {
-    width: 100%; background: rgba(124,58,237,.12) !important; color: #b79cff !important;
-    border: 1px dashed rgba(124,58,237,.4) !important; border-radius: 10px !important;
-    font-family: 'Quicksand', sans-serif !important; font-size: 12px !important;
+    width: 100% !important; height: 100% !important;
+    background: transparent !important; border: none !important; box-shadow: none !important;
+    color: transparent !important; font-size: 0 !important; cursor: pointer !important;
 }
 
 /* ---------- Confession Analyzer modal: same blurred backdrop as the AI chat ---------- */
@@ -430,6 +444,17 @@ st.markdown("""
 .cw-emotion-badge { font-family: 'Quicksand', sans-serif; font-size: 16px; font-weight: 700; color: #f0eaf7; }
 .cw-emotion-secondary { font-family: 'Quicksand', sans-serif; font-size: 13px; color: #b0a4c4; margin-top: 4px; }
 .cw-intensity { font-family: 'Quicksand', sans-serif; font-size: 12px; color: #9a8fb0; margin-top: 8px; }
+
+/* ---------- Custom nav bar (replaces st.tabs so the selected tab persists) ---------- */
+.cw-nav [data-testid="stRadio"] > div { gap: 22px; border-bottom: 1px solid rgba(255,255,255,.12); padding-bottom: 0; }
+.cw-nav [data-testid="stRadio"] label { padding: 6px 2px 10px !important; }
+.cw-nav [data-testid="stRadio"] label > div:first-child { display: none; }  /* hide the radio circle */
+.cw-nav [data-testid="stRadio"] label p {
+    font-family: 'Quicksand', sans-serif; font-weight: 700; font-size: 14px; color: #9a8fb0;
+}
+.cw-nav [data-testid="stRadio"] label[data-checked="true"] p,
+.cw-nav [data-testid="stRadio"] label:has(input:checked) p { color: #ff9ebd; }
+.cw-nav [data-testid="stRadio"] label:has(input:checked) { border-bottom: 2px solid #ff9ebd; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -817,10 +842,23 @@ else:
                     st.session_state.chat_pending = user_q
                     st.rerun()
 
-tab1, tab2, tab3 = st.tabs(["✏️ Leave a Message", "📝 Browse Wall", "📊 Insights"])
+# Custom nav (instead of st.tabs) so the current tab survives reruns —
+# e.g. closing the Confession Analyzer modal keeps you on Browse Wall
+# instead of snapping back to the first tab.
+TAB_OPTIONS = ["✏️ Leave a Message", "📝 Browse Wall", "📊 Insights"]
+if "active_tab" not in st.session_state:
+    st.session_state.active_tab = TAB_OPTIONS[0]
+
+st.markdown('<div class="cw-nav">', unsafe_allow_html=True)
+st.session_state.active_tab = st.radio(
+    "nav", TAB_OPTIONS,
+    index=TAB_OPTIONS.index(st.session_state.active_tab),
+    horizontal=True, label_visibility="collapsed", key="nav_radio",
+)
+st.markdown('</div>', unsafe_allow_html=True)
 
 # ---- TAB 1: Submit a message ----
-with tab1:
+if st.session_state.active_tab == TAB_OPTIONS[0]:
     st.subheader("Write your message")
     with st.form("new_message_form", clear_on_submit=True):
         target_name = st.text_input(
@@ -865,7 +903,7 @@ with tab1:
             render_card(new_row)
 
 # ---- TAB 2: Browse the wall ----
-with tab2:
+elif st.session_state.active_tab == TAB_OPTIONS[1]:
     st.subheader("The Wall")
     df = load_data()
 
@@ -880,7 +918,7 @@ with tab2:
     if filtered.empty:
         st.info("No messages match your search yet.")
     else:
-        st.caption("Tap 🔍 View on any note to see the AI's interpretation.")
+        st.caption("Tap any note to see the AI's interpretation.")
         rows = filtered.sort_values("id", ascending=False).to_dict(orient="records")
         n_cols = 3
         cols = st.columns(n_cols)
@@ -888,13 +926,13 @@ with tab2:
             with cols[i % n_cols]:
                 with st.container(key=f"note_wrap_{note_row['id']}"):
                     st.markdown(_note_html(note_row), unsafe_allow_html=True)
-                    if st.button("🔍 View", key=f"view_note_{note_row['id']}"):
+                    if st.button("open", key=f"view_note_{note_row['id']}"):
                         st.session_state.selected_note_id = note_row["id"]
                         st.session_state.note_modal_open = True
                         st.rerun()
 
 # ---- TAB 3: Insights dashboard ----
-with tab3:
+elif st.session_state.active_tab == TAB_OPTIONS[2]:
     st.subheader("🧠 Confession Wall Insights")
     st.caption("A quick look at what people are sharing on the wall.")
     df = load_data()
