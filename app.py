@@ -318,48 +318,13 @@ st.markdown("""
 
 .single { max-width: 420px; margin: 24px auto; }
 
-/* ---------- Floating purple AI chat: trigger button (bottom-right, draggable) ---------- */
-.st-key-chat_toggle_btn { position: fixed; bottom: 22px; right: 22px; z-index: 9997; touch-action: none; }
-.st-key-chat_toggle_btn button {
-    background: linear-gradient(135deg, #7c3aed, #9333ea) !important;
-    color: #fff !important; border: none !important; border-radius: 50% !important;
-    width: 54px !important; height: 54px !important; padding: 0 !important;
-    font-size: 22px !important; box-shadow: 0 6px 18px rgba(124, 58, 237, .45) !important;
-    transition: transform .15s ease !important; cursor: grab !important;
-}
-.st-key-chat_toggle_btn button:active { cursor: grabbing !important; }
-.st-key-chat_toggle_btn button:hover { transform: scale(1.06); }
-
-/* ---------- Full-screen dim + blur backdrop (the whole site sits behind this) ---------- */
-.st-key-chat_overlay {
-    position: fixed !important; inset: 0 !important; z-index: 9998 !important;
-    background: rgba(20, 10, 30, .45) !important;
-    backdrop-filter: blur(6px) !important; -webkit-backdrop-filter: blur(6px) !important;
-    display: flex !important; align-items: center !important; justify-content: center !important;
-    padding: 20px !important;
-}
-
-/* ---------- The chat card: sits above the blur, stays sharp ---------- */
-.st-key-chat_modal {
-    background: #fff !important; border-radius: 20px !important;
-    width: 380px !important; max-width: 92vw !important; max-height: 82vh !important;
-    box-shadow: 0 25px 60px rgba(0,0,0,.45) !important;
-    display: flex !important; flex-direction: column !important; overflow: hidden !important;
-    animation: cwOpen .18s ease-out;
-}
+/* ---------- Floating purple AI chat ----------
+   NOTE: positioning is done in JS (see below), not CSS-only, because
+   Streamlit's container "key" CSS classes are only stable on newer
+   versions. These rules only cover things that DON'T depend on that. */
 @keyframes cwOpen {
     from { opacity: 0; transform: translateY(10px) scale(.97); }
     to   { opacity: 1; transform: translateY(0) scale(1); }
-}
-
-.st-key-chat_header {
-    background: linear-gradient(135deg, #7c3aed, #9333ea) !important;
-    padding: 6px 4px 6px 18px !important;
-}
-.st-key-chat_header button {
-    background: transparent !important; border: none !important; box-shadow: none !important;
-    color: #fff !important; font-size: 15px !important; width: 30px !important; height: 30px !important;
-    margin-top: 2px !important;
 }
 .cw-header-title { font-family: 'Quicksand', sans-serif; font-weight: 700; font-size: 15px; color: #fff; padding-top: 10px; }
 .cw-header-sub { font-family: 'Quicksand', sans-serif; font-size: 12px; color: rgba(255,255,255,.85); margin-top: 2px; padding-bottom: 10px; }
@@ -394,16 +359,6 @@ st.markdown("""
 .cw-typing span:nth-child(3) { animation-delay: .4s; }
 @keyframes cwBlink { 0%, 80%, 100% { opacity: .3; } 40% { opacity: 1; } }
 
-.st-key-chat_inputbar { border-top: 1px solid #eee !important; padding: 10px 12px !important; background: #fff !important; }
-.st-key-chat_inputbar input {
-    border-radius: 999px !important; border: 1px solid #ddd !important;
-    padding: 8px 14px !important; font-family: 'Quicksand', sans-serif !important;
-}
-.st-key-chat_inputbar button[kind="formSubmit"], .st-key-chat_inputbar button {
-    background: #7c3aed !important; color: #fff !important; border: none !important;
-    border-radius: 50% !important; width: 36px !important; height: 36px !important;
-    padding: 0 !important;
-}
 </style>
 """, unsafe_allow_html=True)
 
@@ -462,6 +417,12 @@ st.title("🎓 Confession Wall")
 st.caption("Say what's on your mind about teachers, rooms, staff, or fellow students.")
 
 # ---- Floating purple AI chat: MODAL + full-screen blurred backdrop ----
+# NOTE: instead of relying on Streamlit's container "key" CSS classes
+# (only stable on newer Streamlit versions, and were silently failing —
+# that's why the button was invisible before), everything below is
+# positioned with plain JavaScript that locates elements by their stable
+# data-testid attributes / marker <div id> anchors. This works on old and
+# new Streamlit alike.
 if "chat_open" not in st.session_state:
     st.session_state.chat_open = False
 if "chat_history" not in st.session_state:
@@ -469,70 +430,186 @@ if "chat_history" not in st.session_state:
 if "chat_pending" not in st.session_state:
     st.session_state.chat_pending = None
 
-if not st.session_state.chat_open:
-    # CLOSED: only the small floating purple icon is visible (bottom-right, draggable).
-    with st.container(key="chat_toggle_btn"):
-        if st.button("💬", key="chat_toggle"):
-            st.session_state.chat_open = True
-            st.rerun()
-    # Drag-to-move for the floating icon. NOTE: because Streamlit re-renders
-    # this button on every rerun, a dragged position holds until the next
-    # rerun (e.g. sending a chat message), then snaps back to bottom-right —
-    # a fully persistent position needs a custom Streamlit component.
-    components.html(
-        """
-        <script>
-        (function () {
-            var doc = window.parent.document;
-            function attach() {
-                var wrap = doc.querySelector('.st-key-chat_toggle_btn');
-                if (!wrap || wrap.dataset.dragBound) return;
-                wrap.dataset.dragBound = "1";
-                var btn = wrap.querySelector('button');
-                var dragging = false, moved = false, startX = 0, startY = 0;
-                function down(x, y) {
-                    dragging = true; moved = false; startX = x; startY = y;
-                    var r = wrap.getBoundingClientRect();
-                    wrap.style.left = r.left + 'px'; wrap.style.top = r.top + 'px';
-                    wrap.style.right = 'auto'; wrap.style.bottom = 'auto';
-                }
-                function move(x, y) {
-                    if (!dragging) return;
-                    var dx = x - startX, dy = y - startY;
-                    if (Math.abs(dx) > 5 || Math.abs(dy) > 5) moved = true;
-                    if (!moved) return;
-                    var r = wrap.getBoundingClientRect();
-                    var nl = Math.max(4, Math.min(r.left + dx, window.innerWidth - r.width - 4));
-                    var nt = Math.max(4, Math.min(r.top + dy, window.innerHeight - r.height - 4));
-                    wrap.style.left = nl + 'px'; wrap.style.top = nt + 'px';
-                    startX = x; startY = y;
-                }
-                function up() {
-                    if (moved && btn) {
-                        var swallow = function (ev) { ev.stopPropagation(); ev.preventDefault(); btn.removeEventListener('click', swallow, true); };
-                        btn.addEventListener('click', swallow, true);
-                    }
-                    dragging = false;
-                }
-                wrap.addEventListener('mousedown', function (e) { down(e.clientX, e.clientY); });
-                doc.addEventListener('mousemove', function (e) { move(e.clientX, e.clientY); });
-                doc.addEventListener('mouseup', up);
-                wrap.addEventListener('touchstart', function (e) { var t = e.touches[0]; down(t.clientX, t.clientY); }, { passive: true });
-                doc.addEventListener('touchmove', function (e) { var t = e.touches[0]; move(t.clientX, t.clientY); }, { passive: true });
-                doc.addEventListener('touchend', up);
+_CHAT_HEAD_JS = """
+(function () {
+    var doc = window.parent.document;
+    function findButtonByText(text) {
+        var btns = doc.querySelectorAll('[data-testid="stButton"] button');
+        for (var i = 0; i < btns.length; i++) {
+            if (btns[i].textContent.trim() === text) return btns[i];
+        }
+        return null;
+    }
+    function styleFloatingHead() {
+        var btn = findButtonByText('\ud83d\udcac');  // 💬 speech bubble
+        if (!btn) return;
+        var wrap = btn.closest('[data-testid="stButton"]');
+        if (!wrap || wrap.dataset.cwStyled) return;
+        wrap.dataset.cwStyled = '1';
+        wrap.style.position = 'fixed';
+        wrap.style.bottom = '24px';
+        wrap.style.right = '24px';
+        wrap.style.zIndex = '999997';
+        wrap.style.touchAction = 'none';
+        btn.style.background = 'linear-gradient(135deg, #7c3aed, #9333ea)';
+        btn.style.color = '#fff';
+        btn.style.border = 'none';
+        btn.style.borderRadius = '50%';
+        btn.style.width = '56px';
+        btn.style.height = '56px';
+        btn.style.padding = '0';
+        btn.style.fontSize = '24px';
+        btn.style.boxShadow = '0 6px 18px rgba(124,58,237,.5)';
+        btn.style.cursor = 'grab';
+        // make it a draggable "chat head" like Messenger's bubble
+        var dragging = false, moved = false, startX = 0, startY = 0;
+        function down(x, y) {
+            dragging = true; moved = false; startX = x; startY = y;
+            var r = wrap.getBoundingClientRect();
+            wrap.style.left = r.left + 'px'; wrap.style.top = r.top + 'px';
+            wrap.style.right = 'auto'; wrap.style.bottom = 'auto';
+        }
+        function move(x, y) {
+            if (!dragging) return;
+            var dx = x - startX, dy = y - startY;
+            if (Math.abs(dx) > 5 || Math.abs(dy) > 5) moved = true;
+            if (!moved) return;
+            var r = wrap.getBoundingClientRect();
+            var nl = Math.max(4, Math.min(r.left + dx, window.innerWidth - r.width - 4));
+            var nt = Math.max(4, Math.min(r.top + dy, window.innerHeight - r.height - 4));
+            wrap.style.left = nl + 'px'; wrap.style.top = nt + 'px';
+            startX = x; startY = y;
+        }
+        function up() {
+            if (moved) {
+                var swallow = function (ev) { ev.stopPropagation(); ev.preventDefault(); btn.removeEventListener('click', swallow, true); };
+                btn.addEventListener('click', swallow, true);
             }
-            attach();
-            setTimeout(attach, 300);
-        })();
-        </script>
-        """,
-        height=0,
-    )
+            dragging = false;
+        }
+        wrap.addEventListener('mousedown', function (e) { down(e.clientX, e.clientY); });
+        doc.addEventListener('mousemove', function (e) { move(e.clientX, e.clientY); });
+        doc.addEventListener('mouseup', up);
+        wrap.addEventListener('touchstart', function (e) { var t = e.touches[0]; down(t.clientX, t.clientY); }, { passive: true });
+        doc.addEventListener('touchmove', function (e) { var t = e.touches[0]; move(t.clientX, t.clientY); }, { passive: true });
+        doc.addEventListener('touchend', up);
+    }
+    styleFloatingHead();
+    setTimeout(styleFloatingHead, 200);
+    setTimeout(styleFloatingHead, 600);
+})();
+"""
+
+_CHAT_MODAL_JS = """
+(function () {
+    var doc = window.parent.document;
+    function blockFor(id) {
+        var a = doc.getElementById(id);
+        return a ? a.closest('[data-testid="stVerticalBlock"]') : null;
+    }
+    function findButtonByText(root, text) {
+        if (!root) return null;
+        var btns = root.querySelectorAll('button');
+        for (var i = 0; i < btns.length; i++) {
+            if (btns[i].textContent.trim() === text) return btns[i];
+        }
+        return null;
+    }
+    function styleModal() {
+        var overlay = blockFor('cw-overlay-anchor');
+        var modal = blockFor('cw-modal-anchor');
+        var header = blockFor('cw-header-anchor');
+        var inputbar = blockFor('cw-inputbar-anchor');
+        if (!overlay || !modal || overlay.dataset.cwStyled) return;
+        overlay.dataset.cwStyled = '1';
+
+        overlay.style.position = 'fixed';
+        overlay.style.inset = '0';
+        overlay.style.zIndex = '999998';
+        overlay.style.background = 'rgba(20,10,30,.45)';
+        overlay.style.backdropFilter = 'blur(6px)';
+        overlay.style.webkitBackdropFilter = 'blur(6px)';
+        overlay.style.display = 'flex';
+        overlay.style.alignItems = 'center';
+        overlay.style.justifyContent = 'center';
+        overlay.style.padding = '20px';
+
+        modal.style.background = '#fff';
+        modal.style.borderRadius = '20px';
+        modal.style.width = '380px';
+        modal.style.maxWidth = '92vw';
+        modal.style.maxHeight = '82vh';
+        modal.style.boxShadow = '0 25px 60px rgba(0,0,0,.45)';
+        modal.style.display = 'flex';
+        modal.style.flexDirection = 'column';
+        modal.style.overflow = 'hidden';
+        modal.style.animation = 'cwOpen .18s ease-out';
+
+        if (header) {
+            header.style.background = 'linear-gradient(135deg, #7c3aed, #9333ea)';
+            header.style.padding = '6px 4px 6px 18px';
+            var newBtn = findButtonByText(header, '\ud83d\uddd1\ufe0f');
+            var closeBtn = findButtonByText(header, '\u2715');
+            [newBtn, closeBtn].forEach(function (b) {
+                if (!b) return;
+                b.style.background = 'transparent';
+                b.style.border = 'none';
+                b.style.boxShadow = 'none';
+                b.style.color = '#fff';
+                b.style.fontSize = '15px';
+                b.style.width = '30px';
+                b.style.height = '30px';
+                b.style.marginTop = '2px';
+            });
+        }
+
+        if (inputbar) {
+            inputbar.style.borderTop = '1px solid #eee';
+            inputbar.style.padding = '10px 12px';
+            inputbar.style.background = '#fff';
+            var inp = inputbar.querySelector('input[type="text"]');
+            if (inp) {
+                inp.style.borderRadius = '999px';
+                inp.style.border = '1px solid #ddd';
+                inp.style.padding = '8px 14px';
+            }
+            var sendBtn = findButtonByText(inputbar, '\u27a4');
+            if (sendBtn) {
+                sendBtn.style.background = '#7c3aed';
+                sendBtn.style.color = '#fff';
+                sendBtn.style.border = 'none';
+                sendBtn.style.borderRadius = '50%';
+                sendBtn.style.width = '36px';
+                sendBtn.style.height = '36px';
+                sendBtn.style.padding = '0';
+            }
+        }
+    }
+    function autoScroll() {
+        var d = doc.getElementById('cw-body');
+        if (d) d.scrollTop = d.scrollHeight;
+    }
+    styleModal(); autoScroll();
+    setTimeout(function () { styleModal(); autoScroll(); }, 150);
+    setTimeout(function () { styleModal(); autoScroll(); }, 400);
+})();
+"""
+
+if not st.session_state.chat_open:
+    # CLOSED: only the small floating purple "chat head" is visible (bottom-right, draggable).
+    if st.button("💬", key="chat_toggle"):
+        st.session_state.chat_open = True
+        st.rerun()
+    components.html(f"<script>{_CHAT_HEAD_JS}</script>", height=0)
 else:
     # OPEN: full-screen blurred/dimmed backdrop with a sharp floating card on top.
-    with st.container(key="chat_overlay"):
-        with st.container(key="chat_modal"):
-            with st.container(key="chat_header"):
+    with st.container():
+        st.markdown('<div id="cw-overlay-anchor"></div>', unsafe_allow_html=True)
+        with st.container():
+            st.markdown('<div id="cw-modal-anchor"></div>', unsafe_allow_html=True)
+
+            with st.container():
+                st.markdown('<div id="cw-header-anchor"></div>', unsafe_allow_html=True)
                 hcol1, hcol2, hcol3 = st.columns([5, 1, 1])
                 with hcol1:
                     st.markdown(
@@ -582,21 +659,8 @@ else:
             body_html += "</div>"
             st.markdown(body_html, unsafe_allow_html=True)
 
-            # auto-follow the latest message — no manual scrolling needed
-            components.html(
-                """
-                <script>
-                  var d = window.parent.document.getElementById('cw-body');
-                  if (d) { d.scrollTop = d.scrollHeight; }
-                </script>
-                """,
-                height=0,
-            )
-
             # if a question was just sent, generate the reply now (the dots
             # above show for this render), then rerun with the real answer.
-            # We pass the FULL wall (load_data()) as structured records, not
-            # a sentiment-filtered subset or a single text blob.
             if st.session_state.chat_pending:
                 question = st.session_state.chat_pending
                 answer = chatbot_answer(question, _wall_df, st.session_state.chat_history)
@@ -605,7 +669,8 @@ else:
                 st.session_state.chat_pending = None
                 st.rerun()
 
-            with st.container(key="chat_inputbar"):
+            with st.container():
+                st.markdown('<div id="cw-inputbar-anchor"></div>', unsafe_allow_html=True)
                 with st.form("chat_form", clear_on_submit=True):
                     colA, colB = st.columns([5, 1])
                     with colA:
@@ -618,6 +683,8 @@ else:
                     st.session_state.chat_history.append({"role": "user", "content": user_q})
                     st.session_state.chat_pending = user_q
                     st.rerun()
+
+    components.html(f"<script>{_CHAT_MODAL_JS}</script>", height=0)
 
 tab1, tab2, tab3 = st.tabs(["✏️ Leave a Message", "📝 Browse Wall", "📊 Insights"])
 
