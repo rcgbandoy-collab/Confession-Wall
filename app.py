@@ -249,7 +249,7 @@ def render_wall(df: pd.DataFrame):
 # APP LAYOUT
 # --------------------------------------------------------------------------
 st.title("🎓 Confession Wall")
-st.caption("Say what's on your mind about teachers, rooms, staff, or fellow students.")
+st.caption("Say what's on your mind")
 
 tab1, tab2, tab3 = st.tabs(["✏ Leave a Message", "📝 Browse Wall", "📊 Insights"])
 
