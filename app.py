@@ -107,17 +107,28 @@ these exact keys:
         }
 
 
-def chatbot_answer(question: str, df: pd.DataFrame) -> str:
-    """Answer a question about the message dataset using GenAI."""
+def chatbot_answer(question: str, df: pd.DataFrame, history: list | None = None) -> str:
+    """Answer a question about the message dataset using GenAI, with chat memory."""
     sample = df[["target_type", "target_name", "message", "sentiment"]].to_dict(orient="records")
+    convo = ""
+    if history:
+        for turn in history[-6:]:  # keep last few turns for context
+            role = "Student" if turn["role"] == "user" else "You"
+            convo += f"{role}: {turn['content']}\n"
     prompt = f"""
-You are a helpful assistant analyzing a dataset of graduating students' farewell
-messages. Here is the data (as JSON records): {json.dumps(sample)[:6000]}
+You are a warm, friendly assistant chatting with a student about a dataset of
+graduating students' farewell messages. Here is the data (as JSON records):
+{json.dumps(sample)[:6000]}
 
-Answer this question about the data, briefly and clearly: "{question}"
+Conversation so far:
+{convo}
+Student: {question}
+
+Reply naturally and conversationally, like a helpful human would in a chat —
+keep it brief (2-4 sentences) unless more detail is clearly needed.
 """
     try:
-        return _chat(prompt, temperature=0.3)
+        return _chat(prompt, temperature=0.5)
     except Exception as e:
         return f"Sorry, I couldn't process that: {e}"
 
@@ -152,17 +163,18 @@ st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Caveat:wght@500;700&family=Quicksand:wght@400;600;700&display=swap');
 
-.stApp { background: linear-gradient(180deg, #fff5f8 0%, #fffaf0 100%); color: #4a3b47; }
+.stApp { background: linear-gradient(180deg, #1a1620 0%, #221a28 100%); color: #f3e9f0; }
 .stApp h1, .stApp h2, .stApp h3, .stApp label, .stApp p, .stApp span { font-family: 'Quicksand', sans-serif; }
-.stApp h1, .stApp h2, .stApp h3 { color: #b4457a; }
-.stApp label p { color: #6b4a5e !important; font-weight: 700; letter-spacing: .5px; }
+.stApp h1, .stApp h2, .stApp h3 { color: #ff9ebd; }
+.stApp label p { color: #e3c9db !important; font-weight: 700; letter-spacing: .5px; }
+.stCaption, [data-testid="stCaptionContainer"] { color: #b79cff !important; }
 
 /* Wall: masonry-style columns (3 desktop / 2 tablet / 1 phone) */
 .wall { column-count: 3; column-gap: 26px; padding: 12px 6px 30px; }
 @media (max-width: 900px) { .wall { column-count: 2; } }
 @media (max-width: 600px) { .wall { column-count: 1; } }
 
-/* A paper note */
+/* A paper note — stays bright/pastel so it pops against the dark background */
 .note {
     --tilt: 0deg;
     position: relative;
@@ -170,17 +182,17 @@ st.markdown("""
     break-inside: avoid; box-sizing: border-box;
     margin: 0 0 30px; padding: 30px 24px 18px;
     border-radius: 6px 6px 18px 6px;
-    box-shadow: 0 6px 16px rgba(120, 80, 100, 0.18);
+    box-shadow: 0 8px 20px rgba(0, 0, 0, 0.45);
     transform: rotate(var(--tilt));
     transition: transform .25s ease, box-shadow .25s ease;
     text-align: left; overflow-wrap: anywhere;
     background-image: repeating-linear-gradient(transparent 0 27px, rgba(0,0,0,0.05) 27px 28px);
 }
-.note:hover { transform: rotate(0deg) translateY(-6px) scale(1.02); box-shadow: 0 14px 28px rgba(120,80,100,.25); }
+.note:hover { transform: rotate(0deg) translateY(-6px) scale(1.02); box-shadow: 0 16px 32px rgba(0,0,0,.55); }
 .note::before {   /* tape */
     content: ''; position: absolute; top: -12px; left: 50%;
     width: 84px; height: 24px; transform: translateX(-50%) rotate(-3deg);
-    background: var(--tape); opacity: .75; border-radius: 3px;
+    background: var(--tape); opacity: .8; border-radius: 3px;
 }
 .note-to { font-family: 'Quicksand', sans-serif; font-weight: 700; font-size: 13px;
            letter-spacing: 1px; text-transform: uppercase; color: #7a5a6c; }
@@ -193,6 +205,9 @@ st.markdown("""
 
 /* Single note (preview after posting) */
 .single { max-width: 420px; margin: 24px auto; }
+
+/* Chat bubbles — cute font for a more human feel */
+[data-testid="stChatMessage"] p { font-family: 'Quicksand', sans-serif; font-size: 15px; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -349,9 +364,35 @@ with tab3:
             for _, row in suggestions.iterrows():
                 st.markdown(f"- **[{row['target_name']}]** {row['suggestion']}")
 
-        st.markdown("### 💬 Ask about the Wall")
-        question = st.text_input("Ask a question about the messages (e.g. 'What do students say about the canteen?')")
-        if st.button("Ask") and question.strip():
-            with st.spinner("Thinking..."):
-                answer = chatbot_answer(question, analyzed)
-            st.markdown(f"**Answer:** {answer}")
+        st.markdown("### 💾 Backup your data")
+        st.caption("Download the current notes before editing the app code, so nothing gets lost on the next deploy.")
+        st.download_button(
+            "Download messages.csv",
+            data=df.to_csv(index=False),
+            file_name="messages_backup.csv",
+            mime="text/csv",
+        )
+
+        st.markdown("### 💬 Chat with the Wall")
+        st.caption("Ask anything about the messages — chats naturally, like Messenger.")
+
+        if "chat_history" not in st.session_state:
+            st.session_state.chat_history = []
+
+        for turn in st.session_state.chat_history:
+            with st.chat_message(turn["role"]):
+                st.markdown(turn["content"])
+
+        user_q = st.chat_input("Type a message...")
+        if user_q:
+            st.session_state.chat_history.append({"role": "user", "content": user_q})
+            with st.chat_message("user"):
+                st.markdown(user_q)
+
+            with st.chat_message("assistant"):
+                placeholder = st.empty()
+                placeholder.markdown("_typing..._")
+                answer = chatbot_answer(user_q, analyzed, st.session_state.chat_history)
+                placeholder.markdown(answer)
+
+            st.session_state.chat_history.append({"role": "assistant", "content": answer})
