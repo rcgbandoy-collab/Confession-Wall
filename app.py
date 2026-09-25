@@ -9,18 +9,20 @@ and an insights dashboard summarizes everything for the school.
 
 UI: paper-note wall, free-text recipient, note-color picker, floating
 purple iOS-style AI chat MODAL (not a sidebar) with a blurred backdrop.
+The chat now reasons over STRUCTURED note records (author/message/color/
+timestamp/id) instead of one text blob, so "latest" questions are answered
+from real timestamps and authors are never confused with each other.
 
 NOTE: the modal/backdrop trick below relies on Streamlit's
 `st.container(key=...)` feature (Streamlit 1.31+), which puts a stable
 CSS class (`st-key-<key>`) on the container so we can position it with
-`position: fixed`. If you're on an older Streamlit, upgrade it
-(`pip install -U streamlit`) or the chat will fall back to plain inline
-layout instead of a floating modal.
+`position: fixed`. If you're on an older Streamlit, upgrade it.
 """
 
 import html
 import json
 import os
+import re
 from datetime import datetime
 
 import pandas as pd
@@ -58,6 +60,12 @@ COLOR_NAMES = list(NOTE_COLORS.keys())
 # Older rows with no saved color cycle through the light colors only
 FALLBACK_COLORS = [c for c in COLOR_NAMES if c not in ("Black", "Brown")]
 TILTS = [-2.0, 1.5, -1.0, 2.0, -1.5, 1.0]
+
+TEMPORAL_KEYWORDS = [
+    "latest", "newest", "most recent", "just posted", "just now",
+    "last note", "last message", "last post", "recently posted",
+    "who posted last", "who posted most recently", "newest post",
+]
 
 # Any instruct-tuned chat model available on HF Inference Providers works.
 # This one is free-tier friendly and good at following JSON instructions.
@@ -116,39 +124,134 @@ these exact keys:
         }
 
 
+# --------------------------------------------------------------------------
+# CHATBOT: structured record formatting + temporal ("latest") grounding
+# --------------------------------------------------------------------------
+def _sorted_by_time(df: pd.DataFrame, ascending: bool = False) -> pd.DataFrame:
+    d = df.copy()
+    d["_dt"] = pd.to_datetime(d["timestamp"], errors="coerce")
+    return d.sort_values("_dt", ascending=ascending)
+
+
+def _format_notes_block(df: pd.DataFrame, limit: int = 60) -> str:
+    """Each note as its OWN structured record — never a merged text blob, so
+    the AI can't confuse one author's words/color/date with another's."""
+    d = _sorted_by_time(df, ascending=False).head(limit)
+    blocks = []
+    for _, r in d.iterrows():
+        posted = r["_dt"].strftime("%Y-%m-%d %I:%M %p") if pd.notna(r["_dt"]) else str(r.get("timestamp", ""))
+        blocks.append(
+            f'NOTE #{r.get("id", "?")}\n'
+            f'Author: {r.get("sender_name") or "Anonymous"}\n'
+            f'Recipient: {r.get("target_name", "")}\n'
+            f'Color: {r.get("note_color") or "White"}\n'
+            f'Posted: {posted}\n'
+            f'Message: "{r.get("message", "")}"'
+        )
+    return "\n\n".join(blocks)
+
+
+def _wants_latest(question: str) -> bool:
+    q = question.lower()
+    return any(k in q for k in TEMPORAL_KEYWORDS)
+
+
+def _latest_note_ground_truth(df: pd.DataFrame) -> str:
+    """Computed in Python (not guessed by the LLM) so 'latest' questions are
+    always answered from the real timestamp, never retrieval order."""
+    d = _sorted_by_time(df, ascending=False)
+    if d.empty:
+        return "GROUND TRUTH: there are no notes on the wall yet."
+    r = d.iloc[0]
+    posted = r["_dt"].strftime("%Y-%m-%d %I:%M %p") if pd.notna(r["_dt"]) else str(r.get("timestamp", ""))
+    return (
+        f'GROUND TRUTH (computed by timestamp, trust this over anything else): the most '
+        f'recently posted note right now is NOTE #{r.get("id", "?")}, by '
+        f'{r.get("sender_name") or "Anonymous"}, posted {posted}, addressed to '
+        f'"{r.get("target_name", "")}": "{r.get("message", "")}"'
+    )
+
+
 def chatbot_answer(question: str, df: pd.DataFrame, history: list | None = None) -> str:
-    """A friendly general-purpose assistant that also knows about this wall's messages."""
-    sample = df[["target_type", "target_name", "message", "sender_name", "sentiment"]].to_dict(orient="records")
+    """A friendly assistant that reasons over the wall's STRUCTURED notes
+    (author + message + color + timestamp + id kept together per note) and
+    can also chat about anything else using its own knowledge."""
+    notes_block = _format_notes_block(df)[:6000]
+    latest_hint = _latest_note_ground_truth(df) if _wants_latest(question) else ""
     convo = ""
     if history:
-        for turn in history[-6:]:  # keep last few turns for context
+        for turn in history[-6:]:
             role = "Student" if turn["role"] == "user" else "You"
             convo += f"{role}: {turn['content']}\n"
-    prompt = f"""
-You are a warm, friendly, knowledgeable chat assistant living inside a "Confession Wall"
-app, where graduating students post farewell messages. You can chat about ANYTHING the
-student asks — general knowledge, casual conversation, advice — using your own knowledge,
-AND you also have access to EVERY message currently posted on this wall, shown below
-(this list always reflects the latest state of the wall, updated every time someone posts
-a new message). Use the wall's data whenever the question is about it; otherwise just
-answer naturally like a smart, personable human would.
 
-All messages currently on the wall (as JSON records):
-{json.dumps(sample)[:6000]}
+    prompt = f"""
+You are a precise, friendly assistant embedded in a school "Confession Wall" app.
+You can chat about anything using your own knowledge, but for questions about the
+wall you MUST rely only on the structured notes below.
+
+RULES (follow all of these):
+1. Every note below is its OWN separate record (Author, Recipient, Color, Posted,
+   Message). Never merge two notes, and never attribute one author's words to
+   another author.
+2. For questions about "latest / newest / most recent / last / just posted",
+   use ONLY the actual "Posted" timestamps (or the GROUND TRUTH line below if
+   present) — never guess from which note appears first, semantic similarity,
+   or alphabetical order.
+3. When discussing a specific note, name the author explicitly ("Shaira said...",
+   not "the person said..." or "someone said...").
+4. If you cannot confidently tell who wrote a note, say so plainly instead of
+   guessing — accuracy matters more than sounding confident.
+5. Answer directly. Do NOT start with filler like "I understand...", "That's a
+   straightforward message, isn't it?", or "Let me analyze this...". Just answer.
+6. Keep the explanation proportional to the message — don't overanalyze a
+   simple "hi", and give real detail for a message that has more to it.
+7. If asked about someone's texting/writing style, base it only on patterns you
+   can actually see across their messages below — don't invent personality
+   traits or make psychological claims.
+8. Wrap the key point, names, or dates worth emphasizing in **double asterisks**
+   — sparingly, not every word.
+9. Stay on the note/author the student is currently asking about; switch only
+   when they clearly change topic.
+
+{latest_hint}
+
+ALL NOTES CURRENTLY ON THE WALL (newest first):
+{notes_block}
 
 Conversation so far:
 {convo}
 Student: {question}
 
-Reply naturally and conversationally, like a helpful human would in a chat — keep it
-brief (2-4 sentences) unless more detail is clearly needed. If you're not fully sure
-about a fast-changing real-world fact (like a current officeholder or recent news),
-say so honestly instead of guessing.
+Reply in 2-4 sentences unless the question clearly needs more.
 """
     try:
-        return _chat(prompt, temperature=0.5)
+        return _chat(prompt, temperature=0.4)
     except Exception as e:
         return f"Sorry, I couldn't process that: {e}"
+
+
+def _guess_note_accent(answer: str, df: pd.DataFrame):
+    """If the AI's reply names one author, tint that AI bubble with that
+    author's most recent note color (subtle, per-message — not the whole
+    chatbot theme, which stays purple by default)."""
+    names = [n for n in df["sender_name"].dropna().unique() if n and n.lower() != "anonymous"]
+    names.sort(key=len, reverse=True)  # longer names first avoids partial-name collisions
+    low = answer.lower()
+    for name in names:
+        if re.search(r"\b" + re.escape(name.lower()) + r"\b", low):
+            sub = _sorted_by_time(df[df["sender_name"] == name], ascending=False)
+            if sub.empty:
+                continue
+            color = sub.iloc[0].get("note_color", "")
+            if color in NOTE_COLORS:
+                return NOTE_COLORS[color][2]  # the more saturated "tape" hex
+    return None
+
+
+def _bold(escaped_text: str) -> str:
+    """Turn **bold** markers (from the AI's own reply) into <strong> tags.
+    Safe to run AFTER html.escape — no raw user HTML can reach this point."""
+    return re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", escaped_text)
 
 
 # --------------------------------------------------------------------------
@@ -215,15 +318,16 @@ st.markdown("""
 
 .single { max-width: 420px; margin: 24px auto; }
 
-/* ---------- Floating purple AI chat: trigger button ---------- */
-.st-key-chat_toggle_btn { position: fixed; top: 18px; right: 22px; z-index: 9997; }
+/* ---------- Floating purple AI chat: trigger button (bottom-right, draggable) ---------- */
+.st-key-chat_toggle_btn { position: fixed; bottom: 22px; right: 22px; z-index: 9997; touch-action: none; }
 .st-key-chat_toggle_btn button {
     background: linear-gradient(135deg, #7c3aed, #9333ea) !important;
     color: #fff !important; border: none !important; border-radius: 50% !important;
     width: 54px !important; height: 54px !important; padding: 0 !important;
     font-size: 22px !important; box-shadow: 0 6px 18px rgba(124, 58, 237, .45) !important;
-    transition: transform .15s ease !important;
+    transition: transform .15s ease !important; cursor: grab !important;
 }
+.st-key-chat_toggle_btn button:active { cursor: grabbing !important; }
 .st-key-chat_toggle_btn button:hover { transform: scale(1.06); }
 
 /* ---------- Full-screen dim + blur backdrop (the whole site sits behind this) ---------- */
@@ -254,7 +358,7 @@ st.markdown("""
 }
 .st-key-chat_header button {
     background: transparent !important; border: none !important; box-shadow: none !important;
-    color: #fff !important; font-size: 16px !important; width: 34px !important; height: 34px !important;
+    color: #fff !important; font-size: 15px !important; width: 30px !important; height: 30px !important;
     margin-top: 2px !important;
 }
 .cw-header-title { font-family: 'Quicksand', sans-serif; font-weight: 700; font-size: 15px; color: #fff; padding-top: 10px; }
@@ -276,6 +380,7 @@ st.markdown("""
 }
 .cw-bubble.ai { background: #7c3aed; color: #fff; border-bottom-left-radius: 4px; }
 .cw-bubble.user { background: #f1f0f5; color: #222; border-bottom-right-radius: 4px; }
+.cw-bubble strong { text-decoration: underline; text-underline-offset: 2px; }
 
 .cw-typing {
     display: inline-flex; gap: 4px; padding: 12px 14px;
@@ -365,17 +470,70 @@ if "chat_pending" not in st.session_state:
     st.session_state.chat_pending = None
 
 if not st.session_state.chat_open:
-    # CLOSED: only the small floating purple icon is visible.
+    # CLOSED: only the small floating purple icon is visible (bottom-right, draggable).
     with st.container(key="chat_toggle_btn"):
         if st.button("💬", key="chat_toggle"):
             st.session_state.chat_open = True
             st.rerun()
+    # Drag-to-move for the floating icon. NOTE: because Streamlit re-renders
+    # this button on every rerun, a dragged position holds until the next
+    # rerun (e.g. sending a chat message), then snaps back to bottom-right —
+    # a fully persistent position needs a custom Streamlit component.
+    components.html(
+        """
+        <script>
+        (function () {
+            var doc = window.parent.document;
+            function attach() {
+                var wrap = doc.querySelector('.st-key-chat_toggle_btn');
+                if (!wrap || wrap.dataset.dragBound) return;
+                wrap.dataset.dragBound = "1";
+                var btn = wrap.querySelector('button');
+                var dragging = false, moved = false, startX = 0, startY = 0;
+                function down(x, y) {
+                    dragging = true; moved = false; startX = x; startY = y;
+                    var r = wrap.getBoundingClientRect();
+                    wrap.style.left = r.left + 'px'; wrap.style.top = r.top + 'px';
+                    wrap.style.right = 'auto'; wrap.style.bottom = 'auto';
+                }
+                function move(x, y) {
+                    if (!dragging) return;
+                    var dx = x - startX, dy = y - startY;
+                    if (Math.abs(dx) > 5 || Math.abs(dy) > 5) moved = true;
+                    if (!moved) return;
+                    var r = wrap.getBoundingClientRect();
+                    var nl = Math.max(4, Math.min(r.left + dx, window.innerWidth - r.width - 4));
+                    var nt = Math.max(4, Math.min(r.top + dy, window.innerHeight - r.height - 4));
+                    wrap.style.left = nl + 'px'; wrap.style.top = nt + 'px';
+                    startX = x; startY = y;
+                }
+                function up() {
+                    if (moved && btn) {
+                        var swallow = function (ev) { ev.stopPropagation(); ev.preventDefault(); btn.removeEventListener('click', swallow, true); };
+                        btn.addEventListener('click', swallow, true);
+                    }
+                    dragging = false;
+                }
+                wrap.addEventListener('mousedown', function (e) { down(e.clientX, e.clientY); });
+                doc.addEventListener('mousemove', function (e) { move(e.clientX, e.clientY); });
+                doc.addEventListener('mouseup', up);
+                wrap.addEventListener('touchstart', function (e) { var t = e.touches[0]; down(t.clientX, t.clientY); }, { passive: true });
+                doc.addEventListener('touchmove', function (e) { var t = e.touches[0]; move(t.clientX, t.clientY); }, { passive: true });
+                doc.addEventListener('touchend', up);
+            }
+            attach();
+            setTimeout(attach, 300);
+        })();
+        </script>
+        """,
+        height=0,
+    )
 else:
     # OPEN: full-screen blurred/dimmed backdrop with a sharp floating card on top.
     with st.container(key="chat_overlay"):
         with st.container(key="chat_modal"):
             with st.container(key="chat_header"):
-                hcol1, hcol2 = st.columns([6, 1])
+                hcol1, hcol2, hcol3 = st.columns([5, 1, 1])
                 with hcol1:
                     st.markdown(
                         '<div class="cw-header-title">AI Assistant</div>'
@@ -383,27 +541,35 @@ else:
                         unsafe_allow_html=True,
                     )
                 with hcol2:
+                    if st.button("🗑️", key="chat_new", help="New chat (clears this conversation only — wall posts stay)"):
+                        st.session_state.chat_history = []
+                        st.session_state.chat_pending = None
+                        st.rerun()
+                with hcol3:
                     if st.button("✕", key="chat_close"):
                         st.session_state.chat_open = False
                         st.rerun()
 
             # message area (clean initial state — no pre-filled/leftover content)
+            _wall_df = load_data()
             body_html = '<div class="cw-body" id="cw-body">'
             if not st.session_state.chat_history:
                 body_html += (
                     '<div class="cw-row ai"><div>'
                     '<div class="cw-label">AI</div>'
-                    '<div class="cw-bubble ai">Ask me anything — about the wall, or anything else!</div>'
+                    '<div class="cw-bubble ai">Ask anything about the messages posted here.</div>'
                     '</div></div>'
                 )
             for turn in st.session_state.chat_history:
                 is_ai = turn["role"] != "user"
                 side = "ai" if is_ai else "user"
                 label = "AI" if is_ai else "You"
+                content = _bold(html.escape(turn["content"])) if is_ai else html.escape(turn["content"])
+                style = f' style="background:{turn["accent"]};"' if is_ai and turn.get("accent") else ""
                 body_html += (
                     f'<div class="cw-row {side}"><div>'
                     f'<div class="cw-label">{label}</div>'
-                    f'<div class="cw-bubble {side}">{html.escape(turn["content"])}</div>'
+                    f'<div class="cw-bubble {side}"{style}>{content}</div>'
                     f'</div></div>'
                 )
             if st.session_state.chat_pending:
@@ -429,14 +595,13 @@ else:
 
             # if a question was just sent, generate the reply now (the dots
             # above show for this render), then rerun with the real answer.
-            # NOTE: we pass the FULL wall (load_data()), not a sentiment-filtered
-            # subset — otherwise the AI only "sees" messages that already went
-            # through GenAI analysis and misses everything else on the wall.
+            # We pass the FULL wall (load_data()) as structured records, not
+            # a sentiment-filtered subset or a single text blob.
             if st.session_state.chat_pending:
                 question = st.session_state.chat_pending
-                _full_df = load_data()
-                answer = chatbot_answer(question, _full_df, st.session_state.chat_history)
-                st.session_state.chat_history.append({"role": "assistant", "content": answer})
+                answer = chatbot_answer(question, _wall_df, st.session_state.chat_history)
+                accent = _guess_note_accent(answer, _wall_df)
+                st.session_state.chat_history.append({"role": "assistant", "content": answer, "accent": accent})
                 st.session_state.chat_pending = None
                 st.rerun()
 
@@ -561,4 +726,4 @@ with tab3:
             mime="text/csv",
         )
 
-        st.info("💬 Tap the chat icon (top-right, any tab) to ask questions about the wall.")
+        st.info("💬 Tap the chat icon (bottom-right, any tab) to ask questions about the wall.")
