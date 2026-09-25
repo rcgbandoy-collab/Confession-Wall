@@ -1,7 +1,8 @@
-id,timestamp,target_type,target_name,message,sender_name,sentiment,emoji_tag,keywords,suggestion
-1,2026-09-01 10:15,Teacher,Ma'am Santos,Thank you for always staying after class to explain lessons again. I understood Calculus because of you.,Anonymous,,,,
-2,2026-09-02 14:30,Location,Canteen,Please add more vegetarian options and fix the long lines during lunch break.,Anonymous,,,,
-3,2026-09-03 09:00,Teacher,Sir Reyes,You made Physics fun even though I used to hate the subject. I'll miss your jokes during exams.,Maria,,,,
-4,2026-09-04 16:45,Location,Library,"The wifi in the library is so slow, it was hard to do research there. Please upgrade it for future students.",Anonymous,,,,
-5,2026-09-05 11:20,General,School Administration,Four years here changed me. I just wish there were more mental health resources available for students who are struggling.,Anonymous,,,,
-6,2026-09-24 17:47,Teacher,ma'am cath,"hello, ma'am cath!",bandoy,Grateful,🙏 Appreciative,"teaching, experience",The student appreciates the teacher's efforts.
+id,timestamp,target_type,target_name,message,sender_name,sentiment,emoji_tag,keywords,suggestion,views,note_color,meaning,emotion,secondary_emotion,intensity,analyzed_at
+1,2026-09-01 10:15,Teacher,Ma'am Santos,Thank you for always staying after class to explain lessons again. I understood Calculus because of you.,Anonymous,,,,,,,,,,,
+2,2026-09-02 14:30,Location,Canteen,Please add more vegetarian options and fix the long lines during lunch break.,Anonymous,,,,,,,,,,,
+3,2026-09-03 09:00,Teacher,Sir Reyes,You made Physics fun even though I used to hate the subject. I'll miss your jokes during exams.,Maria,,,,,,,,,,,
+4,2026-09-04 16:45,Location,Library,"The wifi in the library is so slow, it was hard to do research there. Please upgrade it for future students.",Anonymous,,,,,,,,,,,
+5,2026-09-05 11:20,General,School Administration,Four years here changed me. I just wish there were more mental health resources available for students who are struggling.,Anonymous,,,,,,,,,,,
+6,2026-09-24 17:47,Teacher,ma'am cath,"hello, ma'am cath!",bandoy,Grateful,🙏 Appreciative,"teaching, experience",The student appreciates the teacher's efforts.,,,,,,,
+7,2026-09-25 13:48,Recipient,shaira,"hello, shaira!",chirro,Neutral,👋 Casual,"goodbye, farewell",,0,Red,,,,,
