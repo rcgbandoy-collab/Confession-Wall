@@ -396,19 +396,20 @@ st.markdown("""
 }
 
 /* ---------- Clickable note cards on the wall ---------- */
-/* The whole card is clickable: an invisible button is overlaid exactly on
-   top of the note (position:absolute, inset:0) so tapping anywhere on the
-   note opens it — no separate visible "View" button needed. */
-[class*="st-key-note_wrap_"] { position: relative; margin-bottom: 30px; }
-[class*="st-key-note_wrap_"] .note { margin-bottom: 0; cursor: pointer; }
-[class*="st-key-note_wrap_"] [data-testid="stButton"] {
-    position: absolute !important; inset: 0 !important; margin: 0 !important; z-index: 5 !important;
-}
+/* A real (guaranteed-clickable) button, styled to blend into the bottom of
+   the note itself — same rounded corners, no border, no gap — so it reads
+   as part of the note rather than a separate UI control. Its background
+   color is set per-note via an inline style (matches that note's paper color). */
+[class*="st-key-note_wrap_"] { margin-bottom: 30px; }
+[class*="st-key-note_wrap_"] .note { margin-bottom: 0; border-radius: 6px 6px 0 0; box-shadow: none; }
+[class*="st-key-note_wrap_"] [data-testid="stButton"] { margin-top: 0; }
 [class*="st-key-note_wrap_"] [data-testid="stButton"] button {
-    width: 100% !important; height: 100% !important;
-    background: transparent !important; border: none !important; box-shadow: none !important;
-    color: transparent !important; font-size: 0 !important; cursor: pointer !important;
+    width: 100% !important; border: none !important; border-radius: 0 0 12px 12px !important;
+    box-shadow: 0 6px 16px rgba(0,0,0,.2) !important;
+    font-family: 'Quicksand', sans-serif !important; font-size: 12px !important;
+    padding: 8px !important; opacity: .85;
 }
+[class*="st-key-note_wrap_"] [data-testid="stButton"] button:hover { opacity: 1; }
 
 /* ---------- Confession Analyzer modal: same blurred backdrop as the AI chat ---------- */
 .st-key-note_overlay {
