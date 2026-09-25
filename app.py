@@ -208,6 +208,22 @@ st.markdown("""
 
 /* Chat bubbles — cute font for a more human feel */
 [data-testid="stChatMessage"] p { font-family: 'Quicksand', sans-serif; font-size: 15px; }
+
+/* Floating chat popover: light Messenger-style panel */
+[data-testid="stPopoverBody"] {
+    background: #f4f6f8 !important;
+    border-radius: 16px !important;
+    padding: 14px !important;
+}
+.chat-bubble-row { display: flex; align-items: flex-end; gap: 8px; margin: 8px 0; }
+.chat-bubble-row.me { flex-direction: row-reverse; }
+.chat-avatar { font-size: 20px; }
+.chat-bubble {
+    font-family: 'Quicksand', sans-serif; font-size: 14px; line-height: 1.4;
+    padding: 9px 14px; border-radius: 16px; max-width: 220px;
+}
+.chat-bubble.them { background: #e6e8eb; color: #222; border-bottom-left-radius: 4px; }
+.chat-bubble.me { background: #4fd1c5; color: #06342f; border-bottom-right-radius: 4px; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -265,6 +281,43 @@ def render_wall(df: pd.DataFrame):
 # --------------------------------------------------------------------------
 st.title("🎓 Confession Wall")
 st.caption("Say what's on your mind")
+
+# ---- Floating chat bubble (Messenger-style, visible on every tab) ----
+_chat_col = st.columns([6, 1])[1]
+with _chat_col:
+    with st.popover("💬", use_container_width=True):
+        st.markdown("**Chat with the Wall**")
+        st.caption("Ask anything about the messages posted here.")
+
+        if "chat_history" not in st.session_state:
+            st.session_state.chat_history = []
+
+        for turn in st.session_state.chat_history:
+            avatar = "🧑" if turn["role"] == "user" else "🤖"
+            side = "me" if turn["role"] == "user" else "them"
+            st.markdown(
+                f'<div class="chat-bubble-row {side}">'
+                f'<div class="chat-avatar">{avatar}</div>'
+                f'<div class="chat-bubble {side}">{html.escape(turn["content"])}</div>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+
+        with st.form("popover_chat_form", clear_on_submit=True):
+            colA, colB = st.columns([5, 1])
+            with colA:
+                user_q = st.text_input("msg", placeholder="Write your message...", label_visibility="collapsed")
+            with colB:
+                send = st.form_submit_button("➤")
+
+        if send and user_q.strip():
+            st.session_state.chat_history.append({"role": "user", "content": user_q})
+            _full_df = load_data()
+            _analyzed = _full_df[_full_df["sentiment"].notna() & (_full_df["sentiment"] != "")]
+            with st.spinner("typing..."):
+                answer = chatbot_answer(user_q, _analyzed, st.session_state.chat_history)
+            st.session_state.chat_history.append({"role": "assistant", "content": answer})
+            st.rerun()
 
 tab1, tab2, tab3 = st.tabs(["✏ Leave a Message", "📝 Browse Wall", "📊 Insights"])
 
@@ -373,26 +426,4 @@ with tab3:
             mime="text/csv",
         )
 
-        st.markdown("### 💬 Chat with the Wall")
-        st.caption("Ask anything about the messages — chats naturally, like Messenger.")
-
-        if "chat_history" not in st.session_state:
-            st.session_state.chat_history = []
-
-        for turn in st.session_state.chat_history:
-            with st.chat_message(turn["role"]):
-                st.markdown(turn["content"])
-
-        user_q = st.chat_input("Type a message...")
-        if user_q:
-            st.session_state.chat_history.append({"role": "user", "content": user_q})
-            with st.chat_message("user"):
-                st.markdown(user_q)
-
-            with st.chat_message("assistant"):
-                placeholder = st.empty()
-                placeholder.markdown("_typing..._")
-                answer = chatbot_answer(user_q, analyzed, st.session_state.chat_history)
-                placeholder.markdown(answer)
-
-            st.session_state.chat_history.append({"role": "assistant", "content": answer})
+        st.info("💬 Tap the chat bubble (top-right, any tab) to ask questions about the wall.")
