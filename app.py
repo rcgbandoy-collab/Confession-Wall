@@ -117,24 +117,33 @@ these exact keys:
 
 
 def chatbot_answer(question: str, df: pd.DataFrame, history: list | None = None) -> str:
-    """Answer a question about the message dataset using GenAI, with chat memory."""
-    sample = df[["target_type", "target_name", "message", "sentiment"]].to_dict(orient="records")
+    """A friendly general-purpose assistant that also knows about this wall's messages."""
+    sample = df[["target_type", "target_name", "message", "sender_name", "sentiment"]].to_dict(orient="records")
     convo = ""
     if history:
         for turn in history[-6:]:  # keep last few turns for context
             role = "Student" if turn["role"] == "user" else "You"
             convo += f"{role}: {turn['content']}\n"
     prompt = f"""
-You are a warm, friendly assistant chatting with a student about a dataset of
-graduating students' farewell messages. Here is the data (as JSON records):
+You are a warm, friendly, knowledgeable chat assistant living inside a "Confession Wall"
+app, where graduating students post farewell messages. You can chat about ANYTHING the
+student asks — general knowledge, casual conversation, advice — using your own knowledge,
+AND you also have access to EVERY message currently posted on this wall, shown below
+(this list always reflects the latest state of the wall, updated every time someone posts
+a new message). Use the wall's data whenever the question is about it; otherwise just
+answer naturally like a smart, personable human would.
+
+All messages currently on the wall (as JSON records):
 {json.dumps(sample)[:6000]}
 
 Conversation so far:
 {convo}
 Student: {question}
 
-Reply naturally and conversationally, like a helpful human would in a chat —
-keep it brief (2-4 sentences) unless more detail is clearly needed.
+Reply naturally and conversationally, like a helpful human would in a chat — keep it
+brief (2-4 sentences) unless more detail is clearly needed. If you're not fully sure
+about a fast-changing real-world fact (like a current officeholder or recent news),
+say so honestly instead of guessing.
 """
     try:
         return _chat(prompt, temperature=0.5)
@@ -384,7 +393,7 @@ else:
                 body_html += (
                     '<div class="cw-row ai"><div>'
                     '<div class="cw-label">AI</div>'
-                    '<div class="cw-bubble ai">Ask anything about the messages posted here.</div>'
+                    '<div class="cw-bubble ai">Ask me anything — about the wall, or anything else!</div>'
                     '</div></div>'
                 )
             for turn in st.session_state.chat_history:
@@ -420,11 +429,13 @@ else:
 
             # if a question was just sent, generate the reply now (the dots
             # above show for this render), then rerun with the real answer.
+            # NOTE: we pass the FULL wall (load_data()), not a sentiment-filtered
+            # subset — otherwise the AI only "sees" messages that already went
+            # through GenAI analysis and misses everything else on the wall.
             if st.session_state.chat_pending:
                 question = st.session_state.chat_pending
                 _full_df = load_data()
-                _analyzed = _full_df[_full_df["sentiment"].notna() & (_full_df["sentiment"] != "")]
-                answer = chatbot_answer(question, _analyzed, st.session_state.chat_history)
+                answer = chatbot_answer(question, _full_df, st.session_state.chat_history)
                 st.session_state.chat_history.append({"role": "assistant", "content": answer})
                 st.session_state.chat_pending = None
                 st.rerun()
