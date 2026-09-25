@@ -3121,7 +3121,7 @@ def _note_html(row) -> str:
     ) = NOTE_COLORS[color]
 
 
-    tilt =
+    tilt = TILTS[rid % len(TILTS)]
         TILTS[
             note_id
             % len(TILTS)
