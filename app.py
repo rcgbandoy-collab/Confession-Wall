@@ -8,7 +8,14 @@ library). GenAI analyzes each message for sentiment, theme, and suggestions,
 and an insights dashboard summarizes everything for the school.
 
 UI: paper-note wall, free-text recipient, note-color picker, floating
-purple iOS-style AI chat widget.
+purple iOS-style AI chat MODAL (not a sidebar) with a blurred backdrop.
+
+NOTE: the modal/backdrop trick below relies on Streamlit's
+`st.container(key=...)` feature (Streamlit 1.31+), which puts a stable
+CSS class (`st-key-<key>`) on the container so we can position it with
+`position: fixed`. If you're on an older Streamlit, upgrade it
+(`pip install -U streamlit`) or the chat will fall back to plain inline
+layout instead of a floating modal.
 """
 
 import html
@@ -19,6 +26,7 @@ from datetime import datetime
 import pandas as pd
 import plotly.express as px
 import streamlit as st
+import streamlit.components.v1 as components
 from huggingface_hub import InferenceClient
 
 # --------------------------------------------------------------------------
@@ -158,7 +166,7 @@ def save_message(row: dict):
 
 
 # --------------------------------------------------------------------------
-# STYLING (paper-note wall + purple iOS-style chat widget)
+# STYLING (paper-note wall + purple floating chat MODAL with blurred backdrop)
 # --------------------------------------------------------------------------
 st.markdown("""
 <style>
@@ -198,33 +206,32 @@ st.markdown("""
 
 .single { max-width: 420px; margin: 24px auto; }
 
-/* ---------- Floating purple AI chat widget ---------- */
-
-/* the popover trigger becomes a round floating purple FAB */
-[data-testid="stPopover"] button {
+/* ---------- Floating purple AI chat: trigger button ---------- */
+.st-key-chat_toggle_btn { position: fixed; top: 18px; right: 22px; z-index: 9997; }
+.st-key-chat_toggle_btn button {
     background: linear-gradient(135deg, #7c3aed, #9333ea) !important;
-    color: #fff !important;
-    border: none !important;
-    border-radius: 50% !important;
-    width: 54px !important; height: 54px !important;
-    padding: 0 !important;
-    font-size: 22px !important;
-    box-shadow: 0 6px 18px rgba(124, 58, 237, .45) !important;
-    transition: transform .15s ease, box-shadow .15s ease !important;
+    color: #fff !important; border: none !important; border-radius: 50% !important;
+    width: 54px !important; height: 54px !important; padding: 0 !important;
+    font-size: 22px !important; box-shadow: 0 6px 18px rgba(124, 58, 237, .45) !important;
+    transition: transform .15s ease !important;
 }
-[data-testid="stPopover"] button:hover {
-    transform: scale(1.06);
-    box-shadow: 0 8px 22px rgba(124, 58, 237, .6) !important;
+.st-key-chat_toggle_btn button:hover { transform: scale(1.06); }
+
+/* ---------- Full-screen dim + blur backdrop (the whole site sits behind this) ---------- */
+.st-key-chat_overlay {
+    position: fixed !important; inset: 0 !important; z-index: 9998 !important;
+    background: rgba(20, 10, 30, .45) !important;
+    backdrop-filter: blur(6px) !important; -webkit-backdrop-filter: blur(6px) !important;
+    display: flex !important; align-items: center !important; justify-content: center !important;
+    padding: 20px !important;
 }
 
-/* the chat panel itself: rounded, white, sharp (never blurred) */
-[data-testid="stPopoverBody"] {
-    background: #ffffff !important;
-    border-radius: 20px !important;
-    padding: 0 !important;
-    width: 340px !important;
-    box-shadow: 0 20px 50px rgba(0,0,0,.35) !important;
-    overflow: hidden !important;
+/* ---------- The chat card: sits above the blur, stays sharp ---------- */
+.st-key-chat_modal {
+    background: #fff !important; border-radius: 20px !important;
+    width: 380px !important; max-width: 92vw !important; max-height: 82vh !important;
+    box-shadow: 0 25px 60px rgba(0,0,0,.45) !important;
+    display: flex !important; flex-direction: column !important; overflow: hidden !important;
     animation: cwOpen .18s ease-out;
 }
 @keyframes cwOpen {
@@ -232,21 +239,19 @@ st.markdown("""
     to   { opacity: 1; transform: translateY(0) scale(1); }
 }
 
-/* blur + dim the page behind the chat while it's open (existing site stays visible) */
-body:has([data-testid="stPopoverBody"]) [data-testid="stAppViewContainer"] > .main {
-    filter: blur(3px) brightness(.85);
-    transition: filter .2s ease;
+.st-key-chat_header {
+    background: linear-gradient(135deg, #7c3aed, #9333ea) !important;
+    padding: 6px 4px 6px 18px !important;
 }
-
-.cw-header {
-    background: linear-gradient(135deg, #7c3aed, #9333ea);
-    color: #fff; padding: 14px 18px;
-    font-family: 'Quicksand', sans-serif;
+.st-key-chat_header button {
+    background: transparent !important; border: none !important; box-shadow: none !important;
+    color: #fff !important; font-size: 16px !important; width: 34px !important; height: 34px !important;
+    margin-top: 2px !important;
 }
-.cw-header-title { font-weight: 700; font-size: 15px; }
-.cw-header-sub { font-size: 12px; opacity: .85; margin-top: 2px; }
+.cw-header-title { font-family: 'Quicksand', sans-serif; font-weight: 700; font-size: 15px; color: #fff; padding-top: 10px; }
+.cw-header-sub { font-family: 'Quicksand', sans-serif; font-size: 12px; color: rgba(255,255,255,.85); margin-top: 2px; padding-bottom: 10px; }
 
-.cw-body { padding: 12px 14px 4px; max-height: 340px; overflow-y: auto; }
+.cw-body { padding: 12px 14px 4px; max-height: 46vh; overflow-y: auto; scroll-behavior: smooth; }
 .cw-row { display: flex; margin: 7px 0; animation: cwIn .2s ease; }
 .cw-row.ai { justify-content: flex-start; }
 .cw-row.user { justify-content: flex-end; }
@@ -275,12 +280,12 @@ body:has([data-testid="stPopoverBody"]) [data-testid="stAppViewContainer"] > .ma
 .cw-typing span:nth-child(3) { animation-delay: .4s; }
 @keyframes cwBlink { 0%, 80%, 100% { opacity: .3; } 40% { opacity: 1; } }
 
-.cw-inputbar { border-top: 1px solid #eee; padding: 10px 12px; background: #fff; }
-.cw-inputbar [data-testid="stTextInput"] input {
+.st-key-chat_inputbar { border-top: 1px solid #eee !important; padding: 10px 12px !important; background: #fff !important; }
+.st-key-chat_inputbar input {
     border-radius: 999px !important; border: 1px solid #ddd !important;
     padding: 8px 14px !important; font-family: 'Quicksand', sans-serif !important;
 }
-.cw-inputbar button {
+.st-key-chat_inputbar button[kind="formSubmit"], .st-key-chat_inputbar button {
     background: #7c3aed !important; color: #fff !important; border: none !important;
     border-radius: 50% !important; width: 36px !important; height: 36px !important;
     padding: 0 !important;
@@ -342,70 +347,101 @@ def render_wall(df: pd.DataFrame):
 st.title("🎓 Confession Wall")
 st.caption("Say what's on your mind about teachers, rooms, staff, or fellow students.")
 
-# ---- Floating purple AI chat widget (visible on every tab) ----
-_chat_col = st.columns([8, 1])[1]
-with _chat_col:
-    with st.popover("💬", use_container_width=True):
-        st.markdown(
-            '<div class="cw-header">'
-            '<div class="cw-header-title">AI Assistant</div>'
-            '<div class="cw-header-sub">Ask anything about the messages posted here.</div>'
-            '</div>',
-            unsafe_allow_html=True,
-        )
+# ---- Floating purple AI chat: MODAL + full-screen blurred backdrop ----
+if "chat_open" not in st.session_state:
+    st.session_state.chat_open = False
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []
+if "chat_pending" not in st.session_state:
+    st.session_state.chat_pending = None
 
-        if "chat_history" not in st.session_state:
-            st.session_state.chat_history = []
-        if "chat_pending" not in st.session_state:
-            st.session_state.chat_pending = None
-
-        body_html = '<div class="cw-body">'
-        for turn in st.session_state.chat_history:
-            is_ai = turn["role"] != "user"
-            side = "ai" if is_ai else "user"
-            label = "AI" if is_ai else "You"
-            body_html += (
-                f'<div class="cw-row {side}"><div>'
-                f'<div class="cw-label">{label}</div>'
-                f'<div class="cw-bubble {side}">{html.escape(turn["content"])}</div>'
-                f'</div></div>'
-            )
-        if st.session_state.chat_pending:
-            body_html += (
-                '<div class="cw-row ai"><div>'
-                '<div class="cw-label">AI</div>'
-                '<div class="cw-typing"><span></span><span></span><span></span></div>'
-                '</div></div>'
-            )
-        body_html += "</div>"
-        st.markdown(body_html, unsafe_allow_html=True)
-
-        # If a question is pending, generate the reply now (shows the typing
-        # dots above for this render, then reruns with the real answer).
-        if st.session_state.chat_pending:
-            question = st.session_state.chat_pending
-            _full_df = load_data()
-            _analyzed = _full_df[_full_df["sentiment"].notna() & (_full_df["sentiment"] != "")]
-            answer = chatbot_answer(question, _analyzed, st.session_state.chat_history)
-            st.session_state.chat_history.append({"role": "assistant", "content": answer})
-            st.session_state.chat_pending = None
+if not st.session_state.chat_open:
+    # CLOSED: only the small floating purple icon is visible.
+    with st.container(key="chat_toggle_btn"):
+        if st.button("💬", key="chat_toggle"):
+            st.session_state.chat_open = True
             st.rerun()
+else:
+    # OPEN: full-screen blurred/dimmed backdrop with a sharp floating card on top.
+    with st.container(key="chat_overlay"):
+        with st.container(key="chat_modal"):
+            with st.container(key="chat_header"):
+                hcol1, hcol2 = st.columns([6, 1])
+                with hcol1:
+                    st.markdown(
+                        '<div class="cw-header-title">AI Assistant</div>'
+                        '<div class="cw-header-sub">Ask anything about the messages posted here.</div>',
+                        unsafe_allow_html=True,
+                    )
+                with hcol2:
+                    if st.button("✕", key="chat_close"):
+                        st.session_state.chat_open = False
+                        st.rerun()
 
-        st.markdown('<div class="cw-inputbar">', unsafe_allow_html=True)
-        with st.form("popover_chat_form", clear_on_submit=True):
-            colA, colB = st.columns([5, 1])
-            with colA:
-                user_q = st.text_input(
-                    "msg", placeholder="Type a message...", label_visibility="collapsed"
+            # message area (clean initial state — no pre-filled/leftover content)
+            body_html = '<div class="cw-body" id="cw-body">'
+            if not st.session_state.chat_history:
+                body_html += (
+                    '<div class="cw-row ai"><div>'
+                    '<div class="cw-label">AI</div>'
+                    '<div class="cw-bubble ai">Ask anything about the messages posted here.</div>'
+                    '</div></div>'
                 )
-            with colB:
-                send = st.form_submit_button("➤")
-        st.markdown('</div>', unsafe_allow_html=True)
+            for turn in st.session_state.chat_history:
+                is_ai = turn["role"] != "user"
+                side = "ai" if is_ai else "user"
+                label = "AI" if is_ai else "You"
+                body_html += (
+                    f'<div class="cw-row {side}"><div>'
+                    f'<div class="cw-label">{label}</div>'
+                    f'<div class="cw-bubble {side}">{html.escape(turn["content"])}</div>'
+                    f'</div></div>'
+                )
+            if st.session_state.chat_pending:
+                body_html += (
+                    '<div class="cw-row ai"><div>'
+                    '<div class="cw-label">AI</div>'
+                    '<div class="cw-typing"><span></span><span></span><span></span></div>'
+                    '</div></div>'
+                )
+            body_html += "</div>"
+            st.markdown(body_html, unsafe_allow_html=True)
 
-        if send and user_q.strip():
-            st.session_state.chat_history.append({"role": "user", "content": user_q})
-            st.session_state.chat_pending = user_q
-            st.rerun()
+            # auto-follow the latest message — no manual scrolling needed
+            components.html(
+                """
+                <script>
+                  var d = window.parent.document.getElementById('cw-body');
+                  if (d) { d.scrollTop = d.scrollHeight; }
+                </script>
+                """,
+                height=0,
+            )
+
+            # if a question was just sent, generate the reply now (the dots
+            # above show for this render), then rerun with the real answer.
+            if st.session_state.chat_pending:
+                question = st.session_state.chat_pending
+                _full_df = load_data()
+                _analyzed = _full_df[_full_df["sentiment"].notna() & (_full_df["sentiment"] != "")]
+                answer = chatbot_answer(question, _analyzed, st.session_state.chat_history)
+                st.session_state.chat_history.append({"role": "assistant", "content": answer})
+                st.session_state.chat_pending = None
+                st.rerun()
+
+            with st.container(key="chat_inputbar"):
+                with st.form("chat_form", clear_on_submit=True):
+                    colA, colB = st.columns([5, 1])
+                    with colA:
+                        user_q = st.text_input(
+                            "msg", placeholder="Type a message...", label_visibility="collapsed"
+                        )
+                    with colB:
+                        send = st.form_submit_button("➤")
+                if send and user_q.strip():
+                    st.session_state.chat_history.append({"role": "user", "content": user_q})
+                    st.session_state.chat_pending = user_q
+                    st.rerun()
 
 tab1, tab2, tab3 = st.tabs(["✏️ Leave a Message", "📝 Browse Wall", "📊 Insights"])
 
@@ -514,4 +550,4 @@ with tab3:
             mime="text/csv",
         )
 
-        st.info("💬 Tap the chat bubble (top-right, any tab) to ask questions about the wall.")
+        st.info("💬 Tap the chat icon (top-right, any tab) to ask questions about the wall.")
