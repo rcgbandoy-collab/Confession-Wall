@@ -169,9 +169,50 @@ def _normalize_text(value) -> str:
     return str(value or "").strip().lower()
 
 
+# Casual greetings/small talk directed AT the assistant itself — these must
+# NEVER trigger wall retrieval, or the model ends up treating the student's
+# own hello as if it were a posted note (the "hello chat" bug).
+SMALLTALK_OPENERS = {
+    "hi", "hello", "hey", "hiya", "yo", "sup", "howdy",
+    "kumusta", "kamusta", "musta", "kamusta ka", "kumusta ka",
+    "good morning", "good afternoon", "good evening", "gm", "test", "testing",
+    "thanks", "thank you", "salamat", "ok", "okay", "kk",
+}
+# If any of these appear anywhere in the question, it's about the wall —
+# never classify it as smalltalk even if it also starts with a greeting
+# (e.g. "hi, who posted the latest note?").
+WALL_SIGNAL_WORDS = {
+    "note", "notes", "message", "messages", "wall", "post", "posted", "posting",
+    "confession", "confessions", "latest", "newest", "oldest", "earliest",
+    "recent", "first", "who", "wrote", "said", "mean", "meaning", "means",
+    "author", "recipient", "sent", "made", "about",
+}
+
+
+def _is_smalltalk(question: str) -> bool:
+    """True only for a short greeting/chit-chat with no wall-related content."""
+    q = _normalize_text(question).strip(" !?.")
+    if not q:
+        return True
+    words = q.split()
+    if len(words) > 6:
+        return False
+    if any(w in WALL_SIGNAL_WORDS for w in words):
+        return False
+    starts_with_greeting = any(
+        q == g or q.startswith(g + " ") or q.startswith(g + ",")
+        for g in SMALLTALK_OPENERS
+    )
+    return starts_with_greeting
+
+
 def _parse_question_intent(question: str) -> str:
     """Lightweight routing so factual wall questions use deterministic retrieval."""
+    if _is_smalltalk(question):
+        return "smalltalk"
     q = _normalize_text(question)
+    if any(x in q for x in ["oldest", "earliest", "first note", "first confession", "first post"]):
+        return "oldest"
     if any(x in q for x in ["latest", "most recent", "newest", "last note", "last confession"]):
         return "latest"
     if any(x in q for x in ["who posted", "who wrote", "who made", "who sent"]):
@@ -190,8 +231,16 @@ def _retrieve_wall_context(question: str, df: pd.DataFrame, limit: int = 12) -> 
     matching first, then keyword overlap. It prevents old/irrelevant rows from
     crowding the prompt and makes 'who posted the latest?' reliable.
     """
+    intent = _parse_question_intent(question)
+
+    # Smalltalk never touches wall data — sending records here is exactly
+    # what caused the model to mistake the student's own "hello chat" for a
+    # posted note. Keep the assistant able to just... talk.
+    if intent == "smalltalk":
+        return "(not applicable — this is casual conversation, not a wall question)", {"intent": intent}
+
     if df.empty:
-        return "No wall messages are currently available.", {}
+        return "No wall messages are currently available.", {"intent": intent}
 
     work = df.copy()
     work["_id"] = pd.to_numeric(work["id"], errors="coerce").fillna(0)
@@ -203,12 +252,12 @@ def _retrieve_wall_context(question: str, df: pd.DataFrame, limit: int = 12) -> 
     ).str.lower()
     work = work.sort_values("_id", ascending=False)
 
-    intent = _parse_question_intent(question)
     q = _normalize_text(question)
 
-    # The highest ID is the newest posted row because save_message increments it.
-    if intent == "latest":
-        row = work.iloc[0]
+    # The highest ID is the newest posted row, the lowest is the oldest,
+    # because save_message always increments the id.
+    if intent in ("latest", "oldest"):
+        row = work.iloc[0] if intent == "latest" else work.iloc[-1]
         context = json.dumps([{
             "id": int(row["_id"]),
             "posted_at": str(row.get("timestamp", "")),
@@ -217,7 +266,7 @@ def _retrieve_wall_context(question: str, df: pd.DataFrame, limit: int = 12) -> 
             "message": str(row.get("message", "")),
             "note_color": str(row.get("note_color", "")),
         }], ensure_ascii=False)
-        return context, {"intent": intent, "latest_id": int(row["_id"])}
+        return context, {"intent": intent, f"{intent}_id": int(row["_id"])}
 
     # Exact author/recipient lookup when a name appears in the question.
     tokens = [t for t in q.replace("?", " ").replace(",", " ").split() if len(t) >= 3]
@@ -270,20 +319,36 @@ def chatbot_answer(question: str, df: pd.DataFrame, history: list | None = None)
 
     intent = meta.get("intent", "general")
     prompt = f"""
-You are the AI assistant inside a Confession Wall. Your job is to answer questions
-about the messages actually posted on the wall.
+You are the AI assistant living inside a school "Confession Wall" app. You are a
+real conversational partner for the student, not just a wall-lookup tool — you can
+greet them back, chat naturally, and also answer questions about the wall when asked.
 
 IMPORTANT RULES:
-1. Use the RETRIEVED WALL RECORDS below as the source of truth for wall questions.
-2. Never invent a name, message, date, or event that is not present in the records.
-3. 'author' means the person who posted/wrote the note. 'recipient' means who/what it was addressed to.
-4. For 'latest/newest/most recent' questions, use the record with the highest id in the retrieved latest record.
-5. For 'what does this mean?' questions, explain the message directly in 1-2 short sentences.
-6. Do NOT start with filler such as 'I understand what you mean', 'That's a pretty straightforward message',
-   'Let me analyze', or similar commentary.
-7. Be specific. If the user asks who posted it, give the author. If they ask what someone meant, explain the message.
-8. If the records do not support the answer, say that the wall data does not contain enough information.
-9. Keep answers concise unless the user asks for detail.
+1. The USER QUESTION is the Student talking TO you. It is never itself a wall note —
+   do not analyze it, attribute it to an author, or treat it as something "posted."
+2. If Detected question type is "smalltalk": this is just a greeting or casual
+   remark, not a wall question. Reply warmly and briefly (like "Hi! How can I help
+   you? You can ask me who posted the latest note, or what a specific note means.")
+   and completely IGNORE the RETRIEVED WALL RECORDS section below — do not mention
+   any note, author, or record in this case.
+3. Otherwise, use the RETRIEVED WALL RECORDS below as the source of truth. Never
+   invent a name, message, date, or event that is not present in the records.
+4. 'author' means the person who posted/wrote the note. 'recipient' means who/what
+   it was addressed to.
+5. For 'latest/newest/most recent' questions, use the record from the latest_id
+   result. For 'oldest/earliest/first' questions, use the record from the oldest_id
+   result. Never guess — these are computed from real timestamps/ids, not from
+   which record you saw first.
+6. For 'what does this mean?' questions, explain the message directly in 1-2 short
+   sentences — that's its purpose/meaning as a note on the wall, not a definition
+   of any word.
+7. Do NOT start with filler such as 'I understand what you mean', 'That's a pretty
+   straightforward message', 'Let me analyze', or similar commentary.
+8. Be specific. If asked who posted it, give the author. If asked what someone
+   meant, explain the message itself.
+9. If the records do not support the answer, say the wall data doesn't contain
+   enough information — never fabricate a note to fill the gap.
+10. Keep answers concise unless the user asks for detail.
 
 Detected question type: {intent}
 
@@ -293,7 +358,7 @@ RETRIEVED WALL RECORDS:
 RECENT CONVERSATION:
 {convo}
 
-USER QUESTION:
+USER QUESTION (the Student talking to you — not a wall note):
 {question}
 
 Answer directly.
