@@ -46,6 +46,8 @@ COLUMNS = [
     "meaning", "emotion", "secondary_emotion", "intensity", "analyzed_at",
 ]
 
+CREATOR_NAME = "Radz Chirro G. Bandoy"
+
 # Controlled emotion vocabulary — used both by the per-note analyzer AND the
 # Insights "Emotions on the Wall" chart, so they always speak the same language.
 EMOTION_CATEGORIES = {
@@ -54,6 +56,22 @@ EMOTION_CATEGORIES = {
     "Confusion": "😕", "Heartbreak": "💔", "Neutral": "😐",
     "Support": "🤝", "Surprise": "😮",
 }
+
+# Sentiment/emotion -> polarity bucket, used by the Insights "Positive vs
+# Negative" chart. Anything not listed here falls back to "Neutral".
+SENTIMENT_POLARITY = {
+    "Grateful": "Positive", "Hopeful": "Positive",
+    "Critical": "Negative",
+    "Neutral": "Neutral", "Mixed": "Neutral", "Nostalgic": "Neutral",
+}
+EMOTION_POLARITY = {
+    "Happiness": "Positive", "Love": "Positive", "Gratitude": "Positive",
+    "Excitement": "Positive", "Support": "Positive", "Surprise": "Positive",
+    "Sadness": "Negative", "Anger": "Negative", "Loneliness": "Negative",
+    "Fear": "Negative", "Confusion": "Negative", "Heartbreak": "Negative",
+    "Neutral": "Neutral",
+}
+POLARITY_COLORS = {"Positive": "#4ade80", "Negative": "#f87171", "Neutral": "#9ca3af"}
 
 # name -> (picker emoji, paper color, tape color, ink color, soft ink color)
 NOTE_COLORS = {
@@ -462,6 +480,13 @@ st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Caveat:wght@500;700&family=Quicksand:wght@400;600;700&display=swap');
 
+/* ---------- Creator credit line ---------- */
+.cw-credit {
+    font-family: 'Quicksand', sans-serif; font-size: 12px; font-weight: 600;
+    letter-spacing: .4px; color: #9a8fb0; margin: 0 0 2px 2px;
+}
+.cw-credit span { color: #ff9ebd; }
+
 /* ---------- Paper wall ---------- */
 .wall { column-count: 3; column-gap: 26px; padding: 12px 6px 30px; }
 @media (max-width: 900px) { .wall { column-count: 2; } }
@@ -496,6 +521,10 @@ st.markdown("""
 .note-date { font-family: 'Quicksand', sans-serif; font-size: 11px; color: var(--sub); margin-top: 4px; }
 
 .single { max-width: 420px; margin: 24px auto; }
+
+/* ---------- Wall toolbar (search + sort) ---------- */
+.cw-wall-toolbar { margin-bottom: 4px; }
+.cw-wall-count { font-family: 'Quicksand', sans-serif; font-size: 12.5px; color: #9a8fb0; margin: 2px 0 14px 2px; }
 
 /* ---------- Floating purple AI chat: trigger button ---------- */
 /* Position/size/drag is now fully controlled by _CHAT_HEAD_JS (inline styles),
@@ -968,9 +997,39 @@ def _guess_note_accent(answer: str, df: pd.DataFrame, question: str = ""):
     return None
 
 
+def _polarity_counts(df: pd.DataFrame) -> pd.DataFrame:
+    """Positive/Negative/Neutral tally built from actual posted notes.
+
+    Prefers the per-note AI 'emotion' (Confession Analyzer) when a note has
+    been opened/analyzed, since it's a finer-grained read of that specific
+    note; otherwise falls back to the 'sentiment' every note already gets
+    at posting time — so every note on the wall counts toward this chart,
+    not just the ones someone has clicked into.
+    """
+    counts = {"Positive": 0, "Negative": 0, "Neutral": 0}
+    for _, row in df.iterrows():
+        emotion = str(row.get("emotion", "")).strip()
+        sentiment = str(row.get("sentiment", "")).strip()
+        if emotion and emotion in EMOTION_POLARITY:
+            polarity = EMOTION_POLARITY[emotion]
+        elif sentiment:
+            polarity = SENTIMENT_POLARITY.get(sentiment, "Neutral")
+        else:
+            continue
+        counts[polarity] += 1
+    out = pd.DataFrame(
+        [{"polarity": k, "count": v} for k, v in counts.items() if v > 0]
+    )
+    return out
+
+
 # --------------------------------------------------------------------------
 # APP LAYOUT
 # --------------------------------------------------------------------------
+st.markdown(
+    f'<div class="cw-credit">Created by <span>{html.escape(CREATOR_NAME)}</span></div>',
+    unsafe_allow_html=True,
+)
 st.title("🎓 Confession Wall")
 st.caption("Say what's on your mind about teachers, rooms, staff, or fellow students.")
 
@@ -1168,7 +1227,20 @@ elif st.session_state.active_tab == TAB_OPTIONS[1]:
     st.subheader("The Wall")
     df = load_data()
 
-    name_filter = st.text_input("Search by recipient name", placeholder="🔍 Search recipient...")
+    st.markdown('<div class="cw-wall-toolbar">', unsafe_allow_html=True)
+    search_col, sort_col = st.columns([3, 1.3])
+    with search_col:
+        name_filter = st.text_input(
+            "Search by recipient name", placeholder="🔍 Search recipient...",
+            label_visibility="collapsed",
+        )
+    with sort_col:
+        sort_choice = st.selectbox(
+            "Sort by",
+            ["🆕 Newest first", "🕰️ Oldest first"],
+            label_visibility="collapsed",
+        )
+    st.markdown('</div>', unsafe_allow_html=True)
 
     filtered = df.copy()
     if name_filter.strip():
@@ -1176,11 +1248,19 @@ elif st.session_state.active_tab == TAB_OPTIONS[1]:
             filtered["target_name"].astype(str).str.contains(name_filter.strip(), case=False, na=False, regex=False)
         ]
 
+    filtered["_id_num"] = pd.to_numeric(filtered["id"], errors="coerce").fillna(0)
+    ascending = sort_choice.startswith("🕰️")
+    filtered = filtered.sort_values("_id_num", ascending=ascending)
+
     if filtered.empty:
         st.info("No messages match your search yet.")
     else:
-        st.caption("Tap anywhere on a note to open its AI meaning and emotion review.")
-        rows = filtered.sort_values("id", ascending=False).to_dict(orient="records")
+        st.markdown(
+            f'<div class="cw-wall-count">{len(filtered)} note(s) · '
+            f'{"oldest" if ascending else "newest"} first · tap a note to open its AI meaning and emotion review</div>',
+            unsafe_allow_html=True,
+        )
+        rows = filtered.to_dict(orient="records")
         n_cols = 3
         cols = st.columns(n_cols)
         for i, note_row in enumerate(rows):
@@ -1223,6 +1303,27 @@ elif st.session_state.active_tab == TAB_OPTIONS[2]:
                 st.plotly_chart(fig2, use_container_width=True)
             else:
                 st.info("Not enough keyword data yet.")
+
+        # NEW — Positive vs Negative, built from every posted note's own AI
+        # sentiment/emotion (not a manual tally): a quick pulse-check chart.
+        st.markdown("### ⚖️ Positive vs Negative")
+        polarity_df = _polarity_counts(df)
+        if polarity_df.empty:
+            st.info("Not enough analyzed notes yet to show a positive/negative breakdown.")
+        else:
+            fig_polarity = px.bar(
+                polarity_df, x="polarity", y="count", color="polarity",
+                color_discrete_map=POLARITY_COLORS,
+                title="How people are feeling on the wall (based on all posted notes)",
+                text="count",
+            )
+            fig_polarity.update_layout(showlegend=False, xaxis_title="", yaxis_title="Notes")
+            st.plotly_chart(fig_polarity, use_container_width=True)
+            total = int(polarity_df["count"].sum())
+            pos = int(polarity_df.loc[polarity_df["polarity"] == "Positive", "count"].sum()) if "Positive" in polarity_df["polarity"].values else 0
+            neg = int(polarity_df.loc[polarity_df["polarity"] == "Negative", "count"].sum()) if "Negative" in polarity_df["polarity"].values else 0
+            if total:
+                st.caption(f"**{pos}** positive vs **{neg}** negative out of {total} analyzed notes.")
 
         # Emotions on the Wall — fed by the same per-note analysis shown in the
         # Confession Analyzer modal (Browse Wall → 🔍 View). Same data, same chart.
