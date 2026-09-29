@@ -688,6 +688,132 @@ st.markdown("""
 .cw-nav [data-testid="stRadio"] label[data-checked="true"] p,
 .cw-nav [data-testid="stRadio"] label:has(input:checked) p { color: #ff9ebd; }
 .cw-nav [data-testid="stRadio"] label:has(input:checked) { border-bottom: 2px solid #ff9ebd; }
+
+/* ==========================================================================
+   GLOBAL GUI OVERHAUL — everything below restyles Streamlit's own default
+   widgets (not just our custom chat/note markup) so the whole app looks
+   like one designed product instead of stock Streamlit + a few custom bits.
+   ========================================================================== */
+
+/* ---------- App background ---------- */
+.stApp {
+    background: radial-gradient(1200px 800px at 10% -10%, #2a1f3d 0%, transparent 60%),
+                radial-gradient(1000px 700px at 100% 0%, #1a2a3d 0%, transparent 55%),
+                #15111e !important;
+}
+[data-testid="stHeader"] { background: transparent !important; }
+.block-container { padding-top: 2.2rem !important; max-width: 1180px !important; }
+
+/* ---------- Typography ---------- */
+html, body, .stApp, .stApp p, .stApp span, .stApp label, .stApp div {
+    font-family: 'Quicksand', sans-serif !important;
+}
+.stApp h1 {
+    font-weight: 800 !important; letter-spacing: -.5px !important;
+    background: linear-gradient(90deg, #ff9ebd, #b79cff 60%, #8ec5ff);
+    -webkit-background-clip: text; background-clip: text; color: transparent !important;
+}
+.stApp h2, .stApp h3 { color: #f0eaf7 !important; font-weight: 700 !important; }
+.stApp [data-testid="stCaptionContainer"], .stApp .stCaption { color: #9a8fb0 !important; }
+.stApp [data-testid="stMarkdownContainer"] p { color: #d8cfe4; }
+
+/* ---------- Form / input fields ---------- */
+[data-testid="stTextInput"] input,
+[data-testid="stTextArea"] textarea,
+[data-testid="stSelectbox"] > div > div,
+[data-baseweb="select"] > div {
+    background: rgba(255,255,255,.05) !important;
+    border: 1px solid rgba(255,255,255,.14) !important;
+    border-radius: 12px !important;
+    color: #f0eaf7 !important;
+}
+[data-testid="stTextInput"] input:focus,
+[data-testid="stTextArea"] textarea:focus {
+    border-color: #b79cff !important;
+    box-shadow: 0 0 0 3px rgba(183,156,255,.25) !important;
+}
+[data-testid="stTextInput"] input::placeholder,
+[data-testid="stTextArea"] textarea::placeholder { color: #7a6f8c !important; }
+[data-testid="stWidgetLabel"] p {
+    color: #c9bcdc !important; font-weight: 700 !important; font-size: 13px !important;
+    letter-spacing: .3px; text-transform: uppercase;
+}
+
+/* ---------- Buttons (site-wide default look) ---------- */
+.stApp button {
+    border-radius: 12px !important;
+    font-family: 'Quicksand', sans-serif !important; font-weight: 700 !important;
+    transition: transform .12s ease, box-shadow .12s ease, opacity .12s ease !important;
+}
+.stApp button:hover { transform: translateY(-1px); }
+.stApp button:active { transform: translateY(0); }
+/* Primary action buttons — form submits (Post to the Wall, etc.) */
+[data-testid="stFormSubmitButton"] button,
+.stApp button[kind="primary"] {
+    background: linear-gradient(135deg, #7c3aed, #d6409f) !important;
+    color: #fff !important; border: none !important;
+    box-shadow: 0 6px 18px rgba(124,58,237,.35) !important;
+}
+[data-testid="stFormSubmitButton"] button:hover,
+.stApp button[kind="primary"]:hover {
+    box-shadow: 0 8px 22px rgba(124,58,237,.5) !important;
+}
+/* Plain secondary buttons (search/sort adjacent controls, download, etc.) */
+.stApp button[kind="secondary"] {
+    background: rgba(255,255,255,.06) !important; color: #e6dcf2 !important;
+    border: 1px solid rgba(255,255,255,.16) !important;
+}
+.stApp button[kind="secondary"]:hover { background: rgba(255,255,255,.12) !important; }
+[data-testid="stDownloadButton"] button {
+    background: rgba(255,255,255,.06) !important; color: #e6dcf2 !important;
+    border: 1px solid rgba(255,255,255,.16) !important; border-radius: 12px !important;
+}
+
+/* ---------- "Write your message" card ---------- */
+[data-testid="stForm"] {
+    background: rgba(255,255,255,.035);
+    border: 1px solid rgba(255,255,255,.09);
+    border-radius: 20px; padding: 26px 26px 14px; box-shadow: 0 10px 30px rgba(0,0,0,.25);
+}
+
+/* ---------- Expander ("Add Color") ---------- */
+[data-testid="stExpander"] {
+    background: rgba(255,255,255,.035) !important;
+    border: 1px solid rgba(255,255,255,.1) !important; border-radius: 14px !important;
+    overflow: hidden;
+}
+[data-testid="stExpander"] summary { font-weight: 700 !important; color: #e6dcf2 !important; }
+
+/* Note-color radio pills */
+div[role="radiogroup"] label {
+    background: rgba(255,255,255,.05); border: 1px solid rgba(255,255,255,.12);
+    border-radius: 999px; padding: 4px 12px !important; margin: 3px !important;
+    transition: border-color .15s ease, background .15s ease;
+}
+div[role="radiogroup"] label:has(input:checked) {
+    border-color: #b79cff; background: rgba(183,156,255,.18);
+}
+
+/* ---------- Alerts (info / warning / success) ---------- */
+[data-testid="stAlert"] {
+    border-radius: 14px !important; border: 1px solid rgba(255,255,255,.12) !important;
+    background: rgba(255,255,255,.04) !important;
+}
+[data-testid="stAlert"] p { color: #e6dcf2 !important; }
+
+/* ---------- Metric-like small toolbar controls on Browse Wall ---------- */
+.cw-wall-toolbar [data-testid="stTextInput"] input,
+.cw-wall-toolbar [data-baseweb="select"] > div { background: rgba(255,255,255,.06) !important; }
+
+/* ---------- Section spacing rhythm ---------- */
+.stApp [data-testid="stVerticalBlock"] > [style*="flex-direction: column"] { gap: .6rem; }
+hr { border-color: rgba(255,255,255,.1) !important; }
+
+/* ---------- Plotly charts: blend into the dark theme ---------- */
+.stApp [data-testid="stPlotlyChart"] {
+    background: rgba(255,255,255,.03); border-radius: 16px; padding: 6px;
+    border: 1px solid rgba(255,255,255,.08);
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -997,6 +1123,23 @@ def _guess_note_accent(answer: str, df: pd.DataFrame, question: str = ""):
     return None
 
 
+def _dark_chart(fig):
+    """Apply the app's dark/purple theme to a Plotly figure so charts blend
+    into the page instead of showing up as bright white boxes."""
+    fig.update_layout(
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font_color="#e6dcf2",
+        font_family="Quicksand, sans-serif",
+        title_font_color="#f0eaf7",
+        legend_font_color="#e6dcf2",
+        margin=dict(t=56, l=10, r=10, b=10),
+    )
+    fig.update_xaxes(gridcolor="rgba(255,255,255,.08)", zerolinecolor="rgba(255,255,255,.12)")
+    fig.update_yaxes(gridcolor="rgba(255,255,255,.08)", zerolinecolor="rgba(255,255,255,.12)")
+    return fig
+
+
 def _polarity_counts(df: pd.DataFrame) -> pd.DataFrame:
     """Positive/Negative/Neutral tally built from actual posted notes.
 
@@ -1289,7 +1432,7 @@ elif st.session_state.active_tab == TAB_OPTIONS[2]:
                 sentiment_counts = analyzed["sentiment"].value_counts().reset_index()
                 sentiment_counts.columns = ["sentiment", "count"]
                 fig = px.pie(sentiment_counts, names="sentiment", values="count", title="Sentiment Distribution")
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(_dark_chart(fig), use_container_width=True)
             else:
                 st.info("No sentiment data yet.")
 
@@ -1300,7 +1443,7 @@ elif st.session_state.active_tab == TAB_OPTIONS[2]:
                 kw_counts = all_keywords.value_counts().head(10).reset_index()
                 kw_counts.columns = ["keyword", "count"]
                 fig2 = px.bar(kw_counts, x="keyword", y="count", title="Most Common Themes")
-                st.plotly_chart(fig2, use_container_width=True)
+                st.plotly_chart(_dark_chart(fig2), use_container_width=True)
             else:
                 st.info("Not enough keyword data yet.")
 
@@ -1318,7 +1461,7 @@ elif st.session_state.active_tab == TAB_OPTIONS[2]:
                 text="count",
             )
             fig_polarity.update_layout(showlegend=False, xaxis_title="", yaxis_title="Notes")
-            st.plotly_chart(fig_polarity, use_container_width=True)
+            st.plotly_chart(_dark_chart(fig_polarity), use_container_width=True)
             total = int(polarity_df["count"].sum())
             pos = int(polarity_df.loc[polarity_df["polarity"] == "Positive", "count"].sum()) if "Positive" in polarity_df["polarity"].values else 0
             neg = int(polarity_df.loc[polarity_df["polarity"] == "Negative", "count"].sum()) if "Negative" in polarity_df["polarity"].values else 0
@@ -1337,7 +1480,7 @@ elif st.session_state.active_tab == TAB_OPTIONS[2]:
                 lambda e: f"{EMOTION_CATEGORIES.get(e, '')} {e}"
             )
             fig3 = px.bar(emo_counts, x="label", y="count", title="Most Common Emotions (from analyzed confessions)")
-            st.plotly_chart(fig3, use_container_width=True)
+            st.plotly_chart(_dark_chart(fig3), use_container_width=True)
             top = emo_counts.iloc[0]
             st.caption(f"Most common emotion so far: **{top['label']}**")
 
