@@ -879,6 +879,71 @@ hr { border-color: rgba(255,255,255,.1) !important; }
     background: rgba(255,255,255,.03); border-radius: 16px; padding: 6px;
     border: 1px solid rgba(255,255,255,.08);
 }
+
+/* ==========================================================================
+   MOBILE / PORTRAIT LAYOUT — a genuinely different, phone-tuned layout,
+   not just a squeezed-down desktop page. Streamlit already auto-stacks
+   st.columns() below ~640px on its own; everything here is on top of that.
+   ========================================================================== */
+@media (max-width: 640px) {
+    .block-container {
+        padding-top: 1.1rem !important;
+        padding-left: .85rem !important; padding-right: .85rem !important;
+        max-width: 100% !important;
+    }
+
+    /* Smaller, tighter header so it doesn't eat the whole first screen */
+    .cw-credit { font-size: 10.5px !important; }
+    .stApp h1 { font-size: 1.7rem !important; line-height: 1.15 !important; }
+    .stApp [data-testid="stCaptionContainer"] { font-size: 12.5px !important; }
+
+    /* Nav pills: one tight row that scrolls sideways instead of wrapping
+       into an awkward second line or shrinking illegibly. */
+    .cw-nav { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+    .cw-nav [data-testid="stRadio"] > div {
+        flex-wrap: nowrap !important; gap: 10px !important; width: max-content;
+    }
+    .cw-nav [data-testid="stRadio"] label p { font-size: 12.5px !important; white-space: nowrap; }
+    .cw-nav [data-testid="stRadio"] label { padding: 5px 2px 9px !important; }
+
+    /* Full-width, thumb-friendly form */
+    [data-testid="stForm"] { padding: 16px 14px 8px !important; border-radius: 16px !important; }
+    [data-testid="stTextArea"] textarea { min-height: 120px !important; }
+    [data-testid="stFormSubmitButton"] button { padding: .65rem !important; font-size: 15px !important; }
+
+    /* Note-color picker: wrap into a neat multi-row grid instead of one
+       cramped scrolling line */
+    div[role="radiogroup"] { flex-wrap: wrap !important; }
+    div[role="radiogroup"] label { padding: 5px 10px !important; font-size: 12.5px !important; }
+
+    /* Browse Wall toolbar: search on its own full-width row, sort below it —
+       clearer to tap than two squeezed side-by-side controls */
+    .cw-wall-toolbar [data-testid="stHorizontalBlock"] { flex-direction: column !important; }
+    .cw-wall-toolbar [data-testid="column"] { width: 100% !important; flex: 1 1 100% !important; }
+
+    /* Paper notes: full width, no tilt (tilt wastes horizontal room on a
+       narrow screen and makes edges clip awkwardly), lighter padding */
+    .wall, [data-testid="column"] .note { width: 100% !important; }
+    .note {
+        --tilt: 0deg !important; padding: 20px 18px 14px !important;
+        margin-bottom: 16px !important;
+    }
+    .note:hover { transform: none !important; }  /* no hover state on touch anyway */
+    .note-msg { font-size: 21px !important; line-height: 24px !important; }
+
+    /* Chat + Confession Analyzer modals: near-full-screen on a phone */
+    .st-key-chat_modal, .st-key-note_modal { width: 96vw !important; max-height: 88vh !important; }
+    .st-key-note_modal { max-width: 96vw !important; }
+    .cw-note-grid, [data-testid="stHorizontalBlock"]:has(.cw-note-left) {
+        flex-direction: column !important;
+    }
+    .cw-note-left, .cw-note-right { padding: 16px !important; }
+    .cw-note-right { border-left: none !important; border-top: 1px solid rgba(255,255,255,.08) !important; }
+    .cw-meaning-text { font-size: 14px !important; }
+
+    /* Insights charts: less side padding so bar/pie labels have room */
+    .stApp [data-testid="stPlotlyChart"] { padding: 2px !important; }
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -903,8 +968,19 @@ _CHAT_HEAD_JS = r"""
     }
 
     function place(wrap, left, top) {
+        // Leave extra clearance at the bottom on phones for the browser's
+        // own UI chrome / gesture bar, using the safe-area inset when the
+        // browser exposes one.
+        var safeBottom = 4;
+        try {
+            var probe = doc.createElement('div');
+            probe.style.cssText = 'position:fixed;bottom:0;height:env(safe-area-inset-bottom,0px);width:1px;visibility:hidden;';
+            doc.body.appendChild(probe);
+            safeBottom = Math.max(4, probe.getBoundingClientRect().height + 10);
+            doc.body.removeChild(probe);
+        } catch (err) {}
         var maxL = win.innerWidth - SIZE - 4;
-        var maxT = win.innerHeight - SIZE - 4;
+        var maxT = win.innerHeight - SIZE - safeBottom;
         wrap.style.left = Math.max(4, Math.min(left, maxL)) + 'px';
         wrap.style.top = Math.max(4, Math.min(top, maxT)) + 'px';
         wrap.style.right = 'auto';
@@ -1403,7 +1479,7 @@ if st.session_state.active_tab == TAB_OPTIONS[0]:
                 horizontal=True,
                 label_visibility="collapsed",
             )
-        submitted = st.form_submit_button("Post to the Wall")
+        submitted = st.form_submit_button("Post to the Wall", use_container_width=True)
 
     if submitted:
         if not target_name.strip():
